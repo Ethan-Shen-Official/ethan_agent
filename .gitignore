@@ -1,0 +1,30 @@
+# Dependencies and build output
+node_modules/
+dist/
+build/
+coverage/
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+configs/local.*
+
+# Agent runtime state and experiment output
+.agent-state/
+experiments/output/
+*.log
+
+# Local planning and reference material
+docs/
+references/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

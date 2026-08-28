@@ -9,13 +9,13 @@ from tools.base import ToolContext
 from tools.executor import ToolExecutor
 from tools.filesystem import ReadFileTool, SearchTool, WriteFileTool
 from tools.registry import ToolRegistry
-from tools.shell import ExecuteTool
+from tools.shell import ShellTool
 
 
 class Harness:
     def __init__(self, provider, cwd: str = ".", max_turns: int = 8) -> None:
         self.state = LoopState()
-        self.registry = ToolRegistry([ReadFileTool(), WriteFileTool(), SearchTool(), ExecuteTool()])
+        self.registry = ToolRegistry([ReadFileTool(), WriteFileTool(), SearchTool(), ShellTool()])
         self.execution_env = LocalExecutionEnv(cwd)
         context = ToolContext(self.execution_env, AllowAllPermissions())
         self.tool_executor = ToolExecutor(self.registry, context)

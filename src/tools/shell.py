@@ -6,7 +6,7 @@ from core.types import ToolResult, ToolSpec
 from .base import ToolContext
 
 
-class ExecuteTool:
+class ShellTool:
     spec = ToolSpec("exe", "Execute a shell command.", {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]})
 
     def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:

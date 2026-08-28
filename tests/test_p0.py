@@ -12,11 +12,11 @@ from tools.base import ToolContext
 from tools.executor import ToolExecutor
 from tools.filesystem import ReadFileTool, SearchTool, WriteFileTool
 from tools.registry import ToolRegistry
-from tools.shell import ExecuteTool
+from tools.shell import ShellTool
 
 
 def make_loop(provider, cwd=".", max_turns=8):
-    registry = ToolRegistry([ReadFileTool(), WriteFileTool(), SearchTool(), ExecuteTool()])
+    registry = ToolRegistry([ReadFileTool(), WriteFileTool(), SearchTool(), ShellTool()])
     context = ToolContext(LocalExecutionEnv(cwd), AllowAllPermissions())
     return AgentLoop(provider, ToolExecutor(registry, context), registry.specs(), LoopConfig(max_turns=max_turns))
 
@@ -88,7 +88,7 @@ def test_builtin_tools(tmp_path: Path):
     assert WriteFileTool().execute({"path": "a.txt", "content": "abc"}, context).is_error is False
     assert ReadFileTool().execute({"path": "a.txt"}, context).content == "abc"
     assert SearchTool().execute({"pattern": "*.txt"}, context).content == "a.txt"
-    result = ExecuteTool().execute({"cmd": "echo ok"}, context)
+    result = ShellTool().execute({"cmd": "echo ok"}, context)
     assert result.is_error is False
     assert "ok" in result.content
 

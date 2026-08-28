@@ -1,0 +1,1 @@
+"""Long-lived application facade."""

@@ -19,14 +19,14 @@ TUI -> Harness -> Agent Loop
                               |
                          SessionStore
                               |
-                           EventSink
+                       AgentEvent stream
 ```
 
 建议的 P0 目录：
 
 ```text
-src/coding_agent/
-├── __main__.py
+src/
+├── main.py
 ├── cli/{main.py,renderer.py}
 ├── core/{types.py,events.py,state.py,loop.py,context.py,errors.py}
 ├── providers/{base.py,openai_compatible.py}

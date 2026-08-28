@@ -7,6 +7,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+*.egg-info/
 
 # Local configuration and credentials
 .env
@@ -16,7 +17,7 @@ configs/local.*
 
 # Agent runtime state and experiment output
 .agent-state/
-experiments/output/
+workspace/
 *.log
 
 # Local planning and reference material

@@ -11,13 +11,13 @@
 ```text
 .
 ├── src/
-│   └── coding_agent/
-│       ├── core/               # 消息、五阶段 agent loop、状态和上下文
-│       ├── providers/          # 模型协议适配
-│       ├── tools/              # 文件、终端和工具执行器
-│       ├── runtime/            # 权限、ExecutionEnv、会话和 Compact
-│       ├── harness/             # 长生命周期运行门面
-│       └── prompts/             # 系统提示词和可复用 prompt 模板
+│   ├── core/                   # 消息、五阶段 agent loop、状态和上下文
+│   ├── providers/              # 模型协议适配
+│   ├── tools/                  # 文件、终端和工具执行器
+│   ├── runtime/                # 权限、ExecutionEnv、会话和 Compact
+│   ├── harness/                # 长生命周期运行门面
+│   ├── cli/                    # 命令行入口和渲染
+│   └── prompts/                # 系统提示词和可复用 prompt 模板
 ├── configs/                    # 本地、测试和生产配置
 ├── experiments/                # 可复现的评测和原型实验
 ├── tests/                      # 单元、集成和端到端测试

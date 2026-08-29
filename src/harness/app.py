@@ -3,6 +3,7 @@ from __future__ import annotations
 from os import PathLike
 
 from core.context import DefaultContextBuilder
+from core.errors import SessionError
 from core.loop import DEFAULT_MAX_TURNS, AgentLoop, LoopConfig
 from core.state import LoopState
 from runtime.execution import LocalExecutionEnv
@@ -77,3 +78,17 @@ class Harness:
 
     def abort(self) -> None:
         self.state.request_cancel()
+
+    def checkout(self, message_id: str | None) -> None:
+        """Switch the active session branch and reload LoopState from it."""
+        checkout = getattr(self.session_store, "checkout", None)
+        if checkout is None:
+            raise SessionError("Configured session store does not support branches")
+        checkout(message_id)
+        self.state.messages = self.session_store.read()
+        self.state.turn_count = 0
+        self.state.stop_reason = None
+        self.state.recovery_failures = 0
+        self._persisted_message_count = len(self.state.messages)
+
+    rollback = checkout

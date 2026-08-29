@@ -5,6 +5,7 @@ import json
 import os
 import uuid
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Iterator, Protocol
 
 from core.errors import SessionError
@@ -19,6 +20,21 @@ class SessionStore(Protocol):
 
     def read(self) -> list[Message]:
         ...
+
+    def checkout(self, message_id: str | None) -> None:
+        ...
+
+
+@dataclass(frozen=True)
+class SessionRecord:
+    """Persisted message envelope used to reconstruct a session branch."""
+
+    version: int
+    session_id: str
+    message_id: str
+    parent_id: str | None
+    operation_id: str
+    message: Message
 
 
 def default_session_path(cwd: str | os.PathLike[str]) -> Path:
@@ -57,9 +73,18 @@ class JsonlSessionStore:
         existing_session_id = records[0].get("session_id") if records else None
         self.session_id = session_id or existing_session_id or uuid.uuid4().hex
         self.operation_id = operation_id or uuid.uuid4().hex
-        self._leaf_id: str | None = None
-        for record in records:
-            self._leaf_id = record.get("message_id") or self._leaf_id
+        self._record_cache = {record.message_id: record for record in self._parse_records(records)}
+        self._leaf_id = self._load_head() or (next(reversed(self._record_cache)) if self._record_cache else None)
+        if self._leaf_id is not None and self._leaf_id not in self._record_cache:
+            raise SessionError("Session head points to a missing message")
+
+    @property
+    def current_leaf_id(self) -> str | None:
+        return self._leaf_id
+
+    @property
+    def head_path(self) -> Path:
+        return self.path.with_suffix(".head")
 
     def append(self, message: Message) -> None:
         message_id = uuid.uuid4().hex
@@ -79,10 +104,129 @@ class JsonlSessionStore:
                 os.fsync(handle.fileno())
         except OSError as exc:
             raise SessionError(f"Could not append session history: {exc}") from exc
+        parsed = SessionRecord(
+            self.version,
+            self.session_id,
+            message_id,
+            self._leaf_id,
+            self.operation_id,
+            message,
+        )
+        self._record_cache[message_id] = parsed
         self._leaf_id = message_id
+        self._write_head()
 
     def read(self) -> list[Message]:
-        return [_decode_message(record["message"]) for record in self._records()]
+        return [record.message for record in self.current_path()]
+
+    def read_all(self) -> list[SessionRecord]:
+        """Return every record, including records outside the active branch."""
+        return list(self._record_cache.values())
+
+    def get_record(self, message_id: str) -> SessionRecord | None:
+        return self._record_cache.get(message_id)
+
+    def current_path(self) -> list[SessionRecord]:
+        """Return the active branch in root-to-leaf order."""
+        chain: list[SessionRecord] = []
+        seen: set[str] = set()
+        current = self._leaf_id
+        while current is not None:
+            if current in seen:
+                raise SessionError("Cycle detected in session parent links")
+            seen.add(current)
+            record = self._record_cache.get(current)
+            if record is None:
+                raise SessionError(f"Missing parent record {current}")
+            chain.append(record)
+            current = record.parent_id
+        chain.reverse()
+        return chain
+
+    def children(self, message_id: str) -> list[SessionRecord]:
+        return [record for record in self._record_cache.values() if record.parent_id == message_id]
+
+    def checkout(self, message_id: str | None) -> None:
+        """Move the active leaf without deleting any historical records."""
+        if message_id is not None and message_id not in self._record_cache:
+            raise SessionError(f"Unknown session message: {message_id}")
+        path = self._path_to(message_id)
+        if not self._is_complete_boundary(path):
+            raise SessionError("Cannot checkout inside an incomplete tool turn")
+        self._leaf_id = message_id
+        self._write_head()
+
+    rollback = checkout
+
+    def _path_to(self, message_id: str | None) -> list[SessionRecord]:
+        if message_id is None:
+            return []
+        chain: list[SessionRecord] = []
+        seen: set[str] = set()
+        current: str | None = message_id
+        while current is not None:
+            if current in seen:
+                raise SessionError("Cycle detected in session parent links")
+            seen.add(current)
+            record = self._record_cache.get(current)
+            if record is None:
+                raise SessionError(f"Missing parent record {current}")
+            chain.append(record)
+            current = record.parent_id
+        chain.reverse()
+        return chain
+
+    @staticmethod
+    def _is_complete_boundary(path: list[SessionRecord]) -> bool:
+        pending: set[str] = set()
+        for record in path:
+            message = record.message
+            if message.role == "assistant":
+                if pending:
+                    return False
+                pending = {call.id for call in message.tool_calls}
+            elif message.role == "tool":
+                if message.tool_result is None or message.tool_result.tool_call_id not in pending:
+                    return False
+                pending.remove(message.tool_result.tool_call_id)
+            elif pending:
+                return False
+        return not pending
+
+    def _load_head(self) -> str | None:
+        if not self.head_path.is_file():
+            return None
+        try:
+            value = self.head_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise SessionError(f"Could not read session head: {exc}") from exc
+        return value or None
+
+    def _write_head(self) -> None:
+        temporary = self.head_path.with_suffix(".head.tmp")
+        try:
+            temporary.write_text(self._leaf_id or "", encoding="utf-8")
+            os.replace(temporary, self.head_path)
+        except OSError as exc:
+            raise SessionError(f"Could not write session head: {exc}") from exc
+
+    def _parse_records(self, records: list[dict[str, Any]]) -> list[SessionRecord]:
+        parsed: list[SessionRecord] = []
+        for record in records:
+            try:
+                parsed.append(
+                    SessionRecord(
+                        int(record.get("version", self.version)),
+                        str(record["session_id"]),
+                        str(record["message_id"]),
+                        record.get("parent_id"),
+                        str(record["operation_id"]),
+                        _decode_message(record["message"]),
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SessionError(f"Invalid session record: {exc}") from exc
+        return parsed
 
     def _records(self) -> Iterator[dict[str, Any]]:
         if not self.path.is_file():

@@ -16,6 +16,7 @@ venv/
 configs/local.*
 
 # Agent runtime state and experiment output
+.agent/
 .agent-state/
 workspace/
 *.log

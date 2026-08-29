@@ -82,9 +82,9 @@ ToolExecutor 统一限制工具结果，默认上限为 2,000 行或 50 KiB，�
 - 当前会话历史；
 - 当前工具 Schema。
 
-Harness 启动时从 JsonlSessionStore 恢复历史；运行过程中按消息追加持久化。JSONL 位于工作区 .agent/sessions/ 下，记录包含 session_id、message_id、parent_id 和 operation_id，便于后续加入分支和操作追踪。
+Harness 启动时从 JsonlSessionStore 恢复当前活动分支；运行过程中按消息追加持久化。JSONL 位于工作区 .agent/sessions/ 下，记录包含 session_id、message_id、parent_id 和 operation_id，旁边的 `.head` 文件记录当前叶节点。通过 SessionStore 的 `checkout`/`rollback` 可以切换到已有历史节点，不删除旧分支；交互式 `/fork` 命令暂未加入。
 
-当前已实现完整历史重放，但尚未实现历史裁剪、Token 预算、自动 Compact、CustomMessage、多分支会话和多会话管理。
+当前已实现活动分支历史重放和不删除历史的 checkout/rollback API，但尚未实现历史裁剪、Token 预算、自动 Compact、CustomMessage、交互式 `/fork` 命令和多会话管理。
 
 ## 测试
 

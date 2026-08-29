@@ -4,6 +4,7 @@ from core.types import Message, ToolCall, ToolResult, ToolSpec
 from providers.base import FakeProvider
 from runtime.execution import LocalExecutionEnv
 from runtime.permissions import AllowAllPermissions
+from core.errors import SessionError
 from runtime.session import JsonlSessionStore, default_session_path
 from tools.base import ToolBase, ToolContext
 from tools.executor import ToolExecutor, ToolOutputLimits
@@ -120,3 +121,48 @@ def test_default_session_path_is_workspace_local(tmp_path: Path):
     path = default_session_path(tmp_path)
     assert path.parent == tmp_path.resolve() / ".agent" / "sessions"
     assert path.suffix == ".jsonl"
+
+
+def test_session_store_replays_active_branch_and_preserves_old_branch(tmp_path: Path):
+    path = tmp_path / "session.jsonl"
+    store = JsonlSessionStore(path, session_id="tree")
+    root = Message.user("root")
+    left = Message.assistant("left")
+    right = Message.assistant("right")
+    store.append(root)
+    root_id = store.current_leaf_id
+    store.append(left)
+    left_id = store.current_leaf_id
+    store.checkout(root_id)
+    store.append(right)
+    right_id = store.current_leaf_id
+
+    restored = JsonlSessionStore(path)
+    assert [message.content for message in restored.read()] == ["root", "right"]
+    assert len(restored.read_all()) == 3
+    assert {record.message.content for record in restored.children(root_id)} == {"left", "right"}
+    assert restored.get_record(left_id).message.content == "left"
+    assert restored.current_leaf_id == right_id
+
+
+def test_session_store_does_not_checkout_inside_tool_turn(tmp_path: Path):
+    path = tmp_path / "session.jsonl"
+    store = JsonlSessionStore(path)
+    call = ToolCall("call", "write", {"path": "x.txt", "content": "x"})
+    store.append(Message.user("do it"))
+    store.append(Message.assistant("", [call]))
+    assistant_id = store.current_leaf_id
+    with pytest.raises(SessionError, match="incomplete tool turn"):
+        store.checkout(assistant_id)
+
+
+def test_harness_checkout_reloads_active_branch(tmp_path: Path):
+    from harness.app import Harness
+
+    path = tmp_path / "tree.jsonl"
+    harness = Harness(FakeProvider(["first", "second"]), str(tmp_path), session_path=path)
+    list(harness.prompt("first prompt"))
+    root_id = JsonlSessionStore(path).current_path()[0].message_id
+    list(harness.prompt("second prompt"))
+    harness.checkout(root_id)
+    assert [message.content for message in harness.state.messages] == ["first prompt"]

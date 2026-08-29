@@ -21,7 +21,12 @@ class ToolResult:
     name: str
     content: str
     is_error: bool = False
-
+    truncated: bool = False
+    truncated_by: Literal["lines", "bytes", None] = None
+    total_lines: int | None = None
+    total_bytes: int | None = None
+    output_lines: int | None = None
+    output_bytes: int | None = None
 
 @dataclass
 class Message:

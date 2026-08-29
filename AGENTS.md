@@ -106,3 +106,18 @@ src/
 ## 测试要求
 
 优先为 `core`、权限、路径校验、工具结果配对、停止条件、取消和 Compact 编写单元测试；使用 FakeProvider + 临时工作区做集成测试。真实模型调用不得成为测试前置条件。
+
+
+## Current P0 implementation
+
+- Harness owns one LoopState and restores its ordered transcript from JsonlSessionStore at startup.
+- The default session file is stored at .agent/sessions/<workspace-hash>.jsonl under the workspace root. Pass --session-file or session_path to choose an explicit location.
+- Each JSONL record contains session_id, message_id, parent_id, operation_id, and a serialized Message. The persisted format is append-only and versioned.
+- Tool output is capped centrally by ToolExecutor at 2,000 lines or 50 KiB by default. File/search/list results use head truncation; exe uses tail truncation. Truncation is UTF-8 byte-safe and records metadata on ToolResult.
+- A truncated result contains an actionable notice for the model. The full source files remain unchanged; callers can use a narrower read/search request to retrieve omitted data.
+
+## Context and persistence boundaries
+
+The provider receives only standard Message values plus ModelRequest.system_prompt and tool schemas. Session persistence is a Harness/runtime concern and does not change the Provider contract. AgentEvent remains a transient observation stream and is not written to the transcript.
+
+The current context builder includes runtime metadata, root AGENTS.md, complete in-memory history, and tool schemas. History pruning, token estimation/enforcement, automatic Compact, CustomMessage projection, and branch-aware session replay remain extension points rather than P0 features.

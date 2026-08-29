@@ -25,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("prompt", nargs="?", help="one prompt; omit for REPL")
     parser.add_argument("--cwd", default=".")
     parser.add_argument(
+        "--session-file",
+        default=None,
+        help="JSONL file used to persist conversation history",
+    )
+    parser.add_argument(
         "--max-turns",
         type=positive_int,
         default=DEFAULT_MAX_TURNS,
@@ -40,7 +45,12 @@ def main(argv: list[str] | None = None) -> int:
     except ProviderError as exc:
         print(f"[provider error] {exc}", file=sys.stderr)
         return 2
-    harness = Harness(provider, args.cwd, max_turns=args.max_turns)
+    harness = Harness(
+        provider,
+        args.cwd,
+        max_turns=args.max_turns,
+        session_path=args.session_file,
+    )
     if args.prompt:
         for event in harness.prompt(args.prompt):
             render(event)

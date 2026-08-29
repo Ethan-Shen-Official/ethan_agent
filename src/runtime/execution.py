@@ -181,11 +181,23 @@ class LocalExecutionEnv(ExecutionEnv):
             stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
             stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
             return 124, stdout, f"command timed out after {self.command_timeout:g}s\n{stderr}"
-        return completed.returncode, self._limit_output(completed.stdout), self._limit_output(completed.stderr)
-
-    def _limit_output(self, output: str) -> str:
+        # Preserve the end of process output so ToolExecutor can apply its
+        # user-facing tail truncation without losing the final diagnostics.
+        return (
+            completed.returncode,
+            self._limit_output(completed.stdout, from_end=True),
+            self._limit_output(completed.stderr, from_end=True),
+        )
+    def _limit_output(self, output: str, *, from_end: bool = False) -> str:
         encoded = output.encode("utf-8", errors="replace")
         if len(encoded) <= self.max_output_bytes:
             return output
-        truncated = encoded[: self.max_output_bytes].decode("utf-8", errors="replace")
-        return f"{truncated}\n...[output truncated at {self.max_output_bytes} bytes]"
+        if from_end:
+            truncated = encoded[-self.max_output_bytes :]
+            while truncated and (truncated[0] & 0xC0) == 0x80:
+                truncated = truncated[1:]
+        else:
+            truncated = encoded[: self.max_output_bytes]
+        text = truncated.decode("utf-8", errors="replace")
+        side = "end" if from_end else "start"
+        return f"{text}\n...[output truncated at {self.max_output_bytes} bytes from {side}]"

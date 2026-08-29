@@ -5,15 +5,21 @@ from typing import Iterator
 
 from .context import ContextBuilder, DefaultContextBuilder
 from .state import LoopState
-from .types import AgentEvent, Message, ModelRequest, ProviderEvent, ToolCall
+from .types import AgentEvent, Message, ModelRequest, ProviderEvent, StopReason, ToolCall
 from providers.base import ModelProvider
 from tools.executor import ToolExecutor
+
+DEFAULT_MAX_TURNS = 8
 
 
 @dataclass(frozen=True)
 class LoopConfig:
-    max_turns: int = 8
+    max_turns: int = DEFAULT_MAX_TURNS
     system_prompt: str = "You are a helpful coding agent. Use tools when needed."
+
+    def __post_init__(self) -> None:
+        if self.max_turns < 1:
+            raise ValueError("max_turns must be at least 1")
 
 
 class AgentLoop:
@@ -30,14 +36,10 @@ class AgentLoop:
         state.messages.append(Message.user(prompt))
         while True:
             if state.cancelled or state.cancel_event.is_set():
-                state.stop_reason = "cancelled"
-                event = AgentEvent("turn_end", {"reason": state.stop_reason})
-                yield event
+                yield self._finish(state, "cancelled")
                 return
             if state.turn_count >= self.config.max_turns:
-                state.stop_reason = "max_turns"
-                event = AgentEvent("turn_end", {"reason": state.stop_reason})
-                yield event
+                yield self._finish(state, "max_turns")
                 return
             request = self.prepare_context(state)
             yield AgentEvent("request_start", {"turn": state.turn_count + 1})
@@ -61,30 +63,36 @@ class AgentLoop:
                 provider_error = str(exc)
             assistant = Message.assistant("".join(text_parts), calls)
             if provider_error:
-                state.stop_reason = "provider_error"
-                event = AgentEvent("error", {"message": provider_error})
-                yield event
-                end = AgentEvent("turn_end", {"reason": state.stop_reason})
-                yield end
+                yield AgentEvent("error", {"message": provider_error})
+                yield self._finish(state, "provider_error")
                 return
             state.total_tokens += usage
             yield AgentEvent("assistant_message", {"message": assistant})
             calls = self.finalize_assistant(assistant, state)
             if not calls:
                 state.messages.append(assistant)
-                state.stop_reason = "completed"
-                end = AgentEvent("turn_end", {"reason": state.stop_reason, "message": assistant.content})
-                yield end
+                yield self._finish(state, "completed", message=assistant.content)
                 return
             state.messages.append(assistant)
             results = []
+            terminate_after_tools = False
             for event in self.tool_executor.execute(calls):
                 yield event
                 if event.kind == "tool_result":
                     results.append(event.data["result"])
+                    terminate_after_tools = terminate_after_tools or bool(event.data.get("terminate", False))
             for result in results:
                 state.messages.append(Message.tool(result))
+            if terminate_after_tools:
+                yield self._finish(state, "hook_stop")
+                return
             state.turn_count += 1
+
+    @staticmethod
+    def _finish(state: LoopState, reason: StopReason, **data) -> AgentEvent:
+        """Set the canonical stop reason and emit the single terminal event."""
+        state.stop_reason = reason
+        return AgentEvent("turn_end", {"reason": reason, **data})
 
     def prepare_context(self, state: LoopState) -> ModelRequest:
         return self.context_builder.build(state, self.tool_specs, self.config.system_prompt)

@@ -1,24 +1,35 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from core.context import DefaultContextBuilder
-from core.loop import AgentLoop, LoopConfig
+from core.loop import DEFAULT_MAX_TURNS, AgentLoop, LoopConfig
 from core.state import LoopState
 from runtime.execution import LocalExecutionEnv
 from runtime.permissions import AllowAllPermissions
 from tools.base import ToolContext
 from tools.executor import ToolExecutor
-from tools.filesystem import ReadFileTool, SearchTool, WriteFileTool
+from tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, SearchTool, WriteFileTool
 from tools.registry import ToolRegistry
 from tools.shell import ShellTool
+from .hooks import ToolLoopHooks
 
 
 class Harness:
-    def __init__(self, provider, cwd: str = ".", max_turns: int = 8) -> None:
+    def __init__(self, provider, cwd: str = ".", max_turns: int = DEFAULT_MAX_TURNS, hooks: ToolLoopHooks | None = None) -> None:
         self.state = LoopState()
-        self.registry = ToolRegistry([ReadFileTool(), WriteFileTool(), SearchTool(), ShellTool()])
+        self.registry = ToolRegistry(
+            [
+                ReadFileTool(),
+                WriteFileTool(),
+                EditFileTool(),
+                ListDirTool(),
+                SearchTool(),
+                ShellTool(),
+            ]
+        )
         self.execution_env = LocalExecutionEnv(cwd)
         context = ToolContext(self.execution_env, AllowAllPermissions())
-        self.tool_executor = ToolExecutor(self.registry, context)
+        self.hooks = hooks or ToolLoopHooks()
+        self.tool_executor = ToolExecutor(self.registry, context, self.hooks)
         self.loop = AgentLoop(
             provider,
             self.tool_executor,

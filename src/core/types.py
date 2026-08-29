@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 Role = Literal["system", "user", "assistant", "tool"]
 
+StopReason = Literal['completed', 'cancelled', 'max_turns', 'budget_exhausted', 'provider_error', 'recovery_exhausted', 'hook_stop']
+
 
 @dataclass(frozen=True)
 class ToolCall:

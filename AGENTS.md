@@ -31,7 +31,17 @@ src/
 ├── core/{types.py,events.py,state.py,loop.py,context.py,errors.py}
 ├── providers/{base.py,openai_compatible.py}
 ├── tools/{base.py,registry.py,executor.py,filesystem.py,shell.py}
-├── runtime/{permissions.py,execution.py,session.py,compact.py}
+├── runtime/
+│   ├── permissions.py
+│   ├── execution.py
+│   ├── compact.py
+│   └── session/
+│       ├── __init__.py
+│       ├── types.py
+│       ├── paths.py
+│       ├── codec.py
+│       ├── tree.py
+│       └── store.py
 └── harness/app.py
 ```
 
@@ -87,7 +97,7 @@ src/
 
 - `ModelProvider.stream(request)`：输出内部 ProviderEvent，不泄漏厂商消息类型；
 - `Tool`：名称、描述、输入校验、风险分类、执行和结果映射；
-- `SessionStore`：追加/读取消息，保留 `session_id`、`message_id`、`parent_id`、`operation_id`；
+- `SessionStore`：追加/读取消息，保留 `session_id`、`message_id`、`parent_id`、`operation_id`；实现已拆分为契约、路径、编解码和 JSONL/树存储模块，保留 `runtime.session` 兼容导出入口；
 - `AgentEvent`：TUI、测试和未来 GUI/RPC/ACP 的只读事件流；
 - `ExecutionEnv`：抽象文件系统、Shell、cwd、环境策略和资源限制。
 
@@ -111,7 +121,7 @@ src/
 ## Current P0 implementation
 
 - Harness owns one LoopState and restores the active branch transcript from JsonlSessionStore at startup.
-- The default session file is stored at .agent/sessions/<workspace-hash>.jsonl under the workspace root. Pass --session-file or session_path to choose an explicit location.
+- A normal launch creates a new session at .agent/sessions/<timestamp>_<12-hex-random-id>.jsonl under the workspace root. The JSONL still stores the full session_id. `--continue` resumes the most recently modified workspace session; `--session-file` or session_path selects an explicit file.
 - Each JSONL record contains session_id, message_id, parent_id, operation_id, and a serialized Message. The persisted format is append-only and versioned. A sibling `.head` file stores the active leaf; checkout/rollback moves that pointer without deleting historical records.
 - Tool output is capped centrally by ToolExecutor at 2,000 lines or 50 KiB by default. File/search/list results use head truncation; exe uses tail truncation. Truncation is UTF-8 byte-safe and records metadata on ToolResult.
 - A truncated result contains an actionable notice for the model. The full source files remain unchanged; callers can use a narrower read/search request to retrieve omitted data.
@@ -120,4 +130,4 @@ src/
 
 The provider receives only standard Message values plus ModelRequest.system_prompt and tool schemas. Session persistence is a Harness/runtime concern and does not change the Provider contract. AgentEvent remains a transient observation stream and is not written to the transcript.
 
-The current context builder includes runtime metadata, root AGENTS.md, the active branch history, and tool schemas. History pruning, token estimation/enforcement, automatic Compact, CustomMessage projection, and interactive fork commands remain extension points rather than P0 features.
+The current context builder includes runtime metadata, root AGENTS.md, the active branch history, and tool schemas. History pruning, token estimation/enforcement, automatic Compact, CustomMessage projection, and interactive fork commands remain extension points rather than P0 features. REPL `/checkout` and `/rollback` only move the session leaf; they do not restore workspace files.

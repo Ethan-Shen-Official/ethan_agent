@@ -5,7 +5,7 @@ from providers.base import FakeProvider
 from runtime.execution import LocalExecutionEnv
 from runtime.permissions import AllowAllPermissions
 from core.errors import SessionError
-from runtime.session import JsonlSessionStore, default_session_path
+from runtime.session import JsonlSessionStore, default_session_path, latest_session_path
 from tools.base import ToolBase, ToolContext
 from tools.executor import ToolExecutor, ToolOutputLimits
 from tools.registry import ToolRegistry
@@ -118,9 +118,43 @@ def test_harness_restores_history_between_instances(tmp_path: Path):
     assert second.state.messages[0].content == "first prompt"
 
 def test_default_session_path_is_workspace_local(tmp_path: Path):
-    path = default_session_path(tmp_path)
-    assert path.parent == tmp_path.resolve() / ".agent" / "sessions"
-    assert path.suffix == ".jsonl"
+    import re
+
+    first = default_session_path(tmp_path)
+    second = default_session_path(tmp_path)
+    assert first.parent == tmp_path.resolve() / ".agent" / "sessions"
+    assert first.suffix == ".jsonl"
+    assert first != second
+    assert re.fullmatch(r"\d{8}-\d{6}-\d{3}_[0-9a-f]{12}", first.stem)
+
+
+def test_latest_session_path_selects_most_recent_file(tmp_path: Path):
+    directory = tmp_path / ".agent" / "sessions"
+    directory.mkdir(parents=True)
+    older = directory / "20260829-010000_old.jsonl"
+    newer = directory / "20260829-020000_new.jsonl"
+    older.write_text("", encoding="utf-8")
+    newer.write_text("", encoding="utf-8")
+    import os
+
+    os.utime(older, (1, 1))
+    os.utime(newer, (2, 2))
+    assert latest_session_path(tmp_path) == newer
+
+
+def test_harness_starts_new_session_by_default_and_can_resume_latest(tmp_path: Path):
+    from harness.app import Harness
+
+    first = Harness(FakeProvider(["one"]), str(tmp_path))
+    list(first.prompt("first"))
+    first_path = first.session_store.path
+    second = Harness(FakeProvider(["two"]), str(tmp_path))
+    assert second.session_store.path != first_path
+    assert second.state.messages == []
+    list(second.prompt("second"))
+    resumed = Harness(FakeProvider(["resumed"]), str(tmp_path), resume=True)
+    assert resumed.session_store.path == second.session_store.path
+    assert [message.content for message in resumed.state.messages] == ["second", "two"]
 
 
 def test_session_store_replays_active_branch_and_preserves_old_branch(tmp_path: Path):
@@ -166,3 +200,28 @@ def test_harness_checkout_reloads_active_branch(tmp_path: Path):
     list(harness.prompt("second prompt"))
     harness.checkout(root_id)
     assert [message.content for message in harness.state.messages] == ["first prompt"]
+
+
+def test_harness_rollback_without_id_returns_to_previous_user_turn(tmp_path: Path):
+    from harness.app import Harness
+
+    path = tmp_path / "rollback.jsonl"
+    harness = Harness(FakeProvider(["one", "two"]), str(tmp_path), session_path=path)
+    list(harness.prompt("first"))
+    list(harness.prompt("second"))
+    harness.rollback()
+    assert [message.content for message in harness.state.messages] == ["first", "one"]
+
+
+def test_repl_checkout_command_switches_harness_branch(tmp_path: Path, capsys):
+    from cli.main import handle_repl_command
+    from harness.app import Harness
+
+    path = tmp_path / "commands.jsonl"
+    harness = Harness(FakeProvider(["one", "two"]), str(tmp_path), session_path=path)
+    list(harness.prompt("first"))
+    first_id = JsonlSessionStore(path).current_path()[0].message_id
+    list(harness.prompt("second"))
+    assert handle_repl_command(f"/checkout {first_id[:8]}", harness) is True
+    assert [message.content for message in harness.state.messages] == ["first"]
+    assert "active message" in capsys.readouterr().out

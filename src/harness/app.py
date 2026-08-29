@@ -8,7 +8,7 @@ from core.loop import DEFAULT_MAX_TURNS, AgentLoop, LoopConfig
 from core.state import LoopState
 from runtime.execution import LocalExecutionEnv
 from runtime.permissions import AllowAllPermissions
-from runtime.session import JsonlSessionStore, SessionStore, default_session_path
+from runtime.session import JsonlSessionStore, SessionStore, default_session_path, latest_session_path
 from tools.base import ToolContext
 from tools.executor import ToolExecutor, ToolOutputLimits
 from tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, SearchTool, WriteFileTool
@@ -25,13 +25,20 @@ class Harness:
         max_turns: int = DEFAULT_MAX_TURNS,
         hooks: ToolLoopHooks | None = None,
         session_path: str | PathLike[str] | None = None,
+        resume: bool = False,
         session_store: SessionStore | None = None,
         tool_output_limits: ToolOutputLimits | None = None,
     ) -> None:
         self.execution_env = LocalExecutionEnv(cwd)
-        self.session_store = session_store or JsonlSessionStore(
-            session_path or default_session_path(self.execution_env.cwd)
-        )
+        if session_store is not None:
+            self.session_store = session_store
+        else:
+            selected_path = session_path
+            if selected_path is None and resume:
+                selected_path = latest_session_path(self.execution_env.cwd)
+            self.session_store = JsonlSessionStore(
+                selected_path or default_session_path(self.execution_env.cwd)
+            )
         restored_messages = self.session_store.read()
         self.state = LoopState(messages=restored_messages)
         self._persisted_message_count = len(restored_messages)
@@ -91,4 +98,19 @@ class Harness:
         self.state.recovery_failures = 0
         self._persisted_message_count = len(self.state.messages)
 
-    rollback = checkout
+    def resolve_message_id(self, value: str) -> str:
+        resolver = getattr(self.session_store, "resolve_message_id", None)
+        if resolver is None:
+            raise SessionError("Configured session store does not support message lookup")
+        return resolver(value)
+
+    def rollback(self, message_id: str | None = None) -> None:
+        rollback = getattr(self.session_store, "rollback", None)
+        if rollback is None:
+            raise SessionError("Configured session store does not support rollback")
+        rollback(message_id)
+        self.state.messages = self.session_store.read()
+        self.state.turn_count = 0
+        self.state.stop_reason = None
+        self.state.recovery_failures = 0
+        self._persisted_message_count = len(self.state.messages)

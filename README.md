@@ -22,7 +22,15 @@ REPL：
 
 - --cwd：工作目录。
 - --max-turns：单次 prompt 的最大 Loop 轮数，默认 24。
-- --session-file：会话 JSONL 文件；省略时使用工作区 .agent/sessions/ 下按工作区哈希生成的默认路径。
+- --session-file：会话 JSONL 文件；指定后打开该文件。
+- --continue：恢复工作区 `.agent/sessions/` 下最近修改的会话；不指定时每次启动创建新的时间戳 + 12 位随机 ID 会话文件。
+
+REPL 中的会话命令：
+
+- `/checkout <message-id>`：切换到指定消息节点；支持唯一 ID 前缀。
+- `/rollback [message-id]`：带 ID 时切换到指定节点；不带 ID 时回退当前用户任务之前的安全边界。
+
+这些命令只回滚消息上下文，不撤销工具已经产生的文件或 Shell 副作用。
 
 ## 架构
 
@@ -82,9 +90,9 @@ ToolExecutor 统一限制工具结果，默认上限为 2,000 行或 50 KiB，�
 - 当前会话历史；
 - 当前工具 Schema。
 
-Harness 启动时从 JsonlSessionStore 恢复当前活动分支；运行过程中按消息追加持久化。JSONL 位于工作区 .agent/sessions/ 下，记录包含 session_id、message_id、parent_id 和 operation_id，旁边的 `.head` 文件记录当前叶节点。通过 SessionStore 的 `checkout`/`rollback` 可以切换到已有历史节点，不删除旧分支；交互式 `/fork` 命令暂未加入。
+Harness 启动时从 JsonlSessionStore 恢复当前活动分支；运行过程中按消息追加持久化。默认每次启动创建 `.agent/sessions/<timestamp>_<12位随机ID>.jsonl`，`--continue` 才恢复最近会话，`--session-file` 可打开指定会话。每个 JSONL 记录包含 session_id、message_id、parent_id 和 operation_id，旁边的 `.head` 文件记录当前叶节点。通过 SessionStore 的 `checkout`/`rollback` 可以切换到已有历史节点，不删除旧分支；交互式 `/fork` 命令暂未加入。
 
-当前已实现活动分支历史重放和不删除历史的 checkout/rollback API，但尚未实现历史裁剪、Token 预算、自动 Compact、CustomMessage、交互式 `/fork` 命令和多会话管理。
+当前已实现活动分支历史重放和不删除历史的 checkout/rollback API，以及 REPL 中的 `/checkout` 和 `/rollback`；尚未实现历史裁剪、Token 预算、自动 Compact、CustomMessage、交互式 `/fork` 命令和多会话管理。
 
 ## 测试
 
@@ -98,7 +106,7 @@ Harness 启动时从 JsonlSessionStore 恢复当前活动分支；运行过程�
 
 - src/core：消息、Loop、上下文、状态和错误。
 - src/tools：工具契约、注册表、执行器、内置工具和截断器。
-- src/runtime：ExecutionEnv、权限和 SessionStore。
+- src/runtime：ExecutionEnv、权限和运行时策略；`runtime/session/` 内按 `types.py`（契约）、`paths.py`（路径）、`codec.py`（编解码）、`tree.py`（分支树）和 `store.py`（JSONL 存储）拆分，`runtime.session` 保留兼容导出。
 - src/harness：长生命周期入口和工具 Hook 装配。
 - src/providers：模型协议适配。
 - src/cli：命令行入口和事件渲染。

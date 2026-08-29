@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from core.errors import ProviderError
+from core.errors import ProviderError, SessionError
 from core.loop import DEFAULT_MAX_TURNS
 from harness.app import Harness
 from providers.openai_compatible import OpenAICompatibleProvider
@@ -30,12 +30,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSONL file used to persist conversation history",
     )
     parser.add_argument(
+        "--continue",
+        dest="continue_session",
+        action="store_true",
+        help="resume the most recently modified session in the workspace",
+    )
+    parser.add_argument(
         "--max-turns",
         type=positive_int,
         default=DEFAULT_MAX_TURNS,
         help=f"maximum agent turns per prompt (default: {DEFAULT_MAX_TURNS})",
     )
     return parser
+
+
+def handle_repl_command(command: str, harness: Harness) -> bool:
+    """Handle local session commands without entering the model loop."""
+    parts = command.strip().split()
+    if not parts or parts[0] not in {"/checkout", "/rollback"}:
+        return False
+    name = parts[0]
+    if len(parts) > 2 or (name == "/checkout" and len(parts) != 2):
+        usage = f"usage: {name} <message-id>" if name == "/checkout" else "usage: /rollback [message-id]"
+        print(usage)
+        return True
+    try:
+        message_id = harness.resolve_message_id(parts[1]) if len(parts) == 2 else None
+        if name == "/checkout":
+            harness.checkout(message_id)
+        else:
+            harness.rollback(message_id)
+        current = getattr(harness.session_store, "current_leaf_id", None)
+        print(f"[{name[1:]}] active message: {current or 'root'}")
+    except SessionError as exc:
+        print(f"[{name[1:]} error] {exc}", file=sys.stderr)
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         args.cwd,
         max_turns=args.max_turns,
         session_path=args.session_file,
+        resume=args.continue_session,
     )
     if args.prompt:
         for event in harness.prompt(args.prompt):
@@ -64,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
         if prompt.strip() in {"", "/exit", "/quit"}:
             if prompt.strip():
                 return 0
+            continue
+        if handle_repl_command(prompt, harness):
             continue
         for event in harness.prompt(prompt):
             render(event)

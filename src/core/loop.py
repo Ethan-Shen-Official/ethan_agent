@@ -9,7 +9,7 @@ from .types import AgentEvent, Message, ModelRequest, ProviderEvent, StopReason,
 from providers.base import ModelProvider
 from tools.executor import ToolExecutor
 
-DEFAULT_MAX_TURNS = 8
+DEFAULT_MAX_TURNS = 24
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,5 @@
-﻿from pathlib import Path
+import pytest
+from pathlib import Path
 
 from core.context import DefaultContextBuilder
 from core.loop import AgentLoop, LoopConfig
@@ -10,7 +11,7 @@ from runtime.execution import LocalExecutionEnv
 from runtime.permissions import AllowAllPermissions
 from tools.base import ToolContext
 from tools.executor import ToolExecutor
-from tools.filesystem import ReadFileTool, SearchTool, WriteFileTool
+from tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, SearchTool, WriteFileTool
 from tools.registry import ToolRegistry
 from tools.shell import ShellTool
 
@@ -74,12 +75,14 @@ def test_max_turns_stops_tool_loop():
     assert events[-1].data["reason"] == "max_turns"
 
 
-def test_cancel_before_run():
-    loop = make_loop(FakeProvider(["never"]))
+def test_begin_run_resets_cancel_state():
+    loop = make_loop(FakeProvider(["ready"]))
     state = LoopState()
     state.request_cancel()
     events = list(loop.run("cancel", state))
-    assert events[-1].data["reason"] == "cancelled"
+    assert events[-1].data["reason"] == "completed"
+    assert state.cancelled is False
+    assert state.cancel_event.is_set() is False
 
 
 def test_builtin_tools(tmp_path: Path):
@@ -91,6 +94,50 @@ def test_builtin_tools(tmp_path: Path):
     result = ShellTool().execute({"cmd": "echo ok"}, context)
     assert result.is_error is False
     assert "ok" in result.content
+
+
+def test_edit_tool_requires_unique_match_and_updates_file(tmp_path: Path):
+    env = LocalExecutionEnv(tmp_path)
+    context = ToolContext(env, AllowAllPermissions())
+    env.write_file("a.txt", "before\\nbefore\\n")
+    ambiguous = EditFileTool().execute(
+        {"path": "a.txt", "old_text": "before", "new_text": "after"}, context
+    )
+    assert ambiguous.is_error is True
+    replaced = EditFileTool().execute(
+        {
+            "path": "a.txt",
+            "old_text": "before",
+            "new_text": "after",
+            "replace_all": True,
+        },
+        context,
+    )
+    assert replaced.is_error is False
+    assert env.read_file("a.txt") == "after\\nafter\\n"
+
+
+def test_list_dir_tool_lists_nested_entries_and_hides_dotfiles(tmp_path: Path):
+    env = LocalExecutionEnv(tmp_path)
+    context = ToolContext(env, AllowAllPermissions())
+    env.write_file("src/main.py", "print('ok')")
+    env.write_file(".secret", "hidden")
+    result = ListDirTool().execute({"depth": 2}, context)
+    assert result.is_error is False
+    assert "src" + __import__("os").sep in result.content
+    assert "src" + __import__("os").sep + "main.py" in result.content
+    assert ".secret" not in result.content
+
+
+def test_executor_rejects_wrong_argument_types(tmp_path: Path):
+    registry = ToolRegistry([ListDirTool()])
+    context = ToolContext(LocalExecutionEnv(tmp_path), AllowAllPermissions())
+    executor = ToolExecutor(registry, context)
+    call = ToolCall("c1", "list_dir", {"depth": "two"})
+    events = list(executor.execute([call]))
+    result = next(event.data["result"] for event in events if event.kind == "tool_result")
+    assert result.is_error is True
+    assert "must be an integer" in result.content
 
 
 def test_harness_wires_default_tools(tmp_path: Path):
@@ -139,3 +186,89 @@ def test_context_discovers_runtime_metadata_and_root_instructions(tmp_path: Path
     assert "available_tools: none" in request.system_prompt
     assert "Use the project conventions." in request.system_prompt
     assert "Do not include this instruction." not in request.system_prompt
+
+
+def test_before_tool_hook_can_block_without_running_tool(tmp_path: Path):
+    from harness.hooks import ToolHookDecision, ToolLoopHooks
+
+    registry = ToolRegistry([WriteFileTool()])
+    context = ToolContext(LocalExecutionEnv(tmp_path), AllowAllPermissions())
+    hooks = ToolLoopHooks(
+        before_tool=lambda ctx: ToolHookDecision(action="block", reason="policy blocked")
+    )
+    executor = ToolExecutor(registry, context, hooks)
+    call = ToolCall("c1", "write", {"path": "blocked.txt", "content": "no"})
+    result = next(event.data["result"] for event in executor.execute([call]) if event.kind == "tool_result")
+    assert result.is_error is True
+    assert "policy blocked" in result.content
+    assert not (tmp_path / "blocked.txt").exists()
+
+
+def test_before_tool_replacement_is_validated_and_used(tmp_path: Path):
+    from harness.hooks import ToolHookDecision, ToolLoopHooks
+
+    registry = ToolRegistry([WriteFileTool()])
+    context = ToolContext(LocalExecutionEnv(tmp_path), AllowAllPermissions())
+    hooks = ToolLoopHooks(
+        before_tool=lambda ctx: ToolHookDecision(
+            action="replace_arguments",
+            arguments={"path": "replacement.txt", "content": "updated"},
+        )
+    )
+    executor = ToolExecutor(registry, context, hooks)
+    call = ToolCall("c1", "write", {"path": "original.txt", "content": "original"})
+    result = next(event.data["result"] for event in executor.execute([call]) if event.kind == "tool_result")
+    assert result.is_error is False
+    assert (tmp_path / "replacement.txt").read_text() == "updated"
+    assert not (tmp_path / "original.txt").exists()
+
+
+def test_after_tool_can_transform_result_and_stop_loop(tmp_path: Path):
+    from harness.hooks import ToolHookDecision, ToolLoopHooks
+
+    call = ToolCall("c1", "write", {"path": "note.txt", "content": "saved"})
+    hooks = ToolLoopHooks(
+        after_tool=lambda ctx: ToolHookDecision(
+            action="replace_result",
+            result=type(ctx.result)(ctx.result.tool_call_id, ctx.result.name, "redacted", False),
+            terminate=True,
+        )
+    )
+    harness = Harness(FakeProvider([[call], "must not run"]), str(tmp_path), hooks=hooks)
+    events = list(harness.prompt("write a note"))
+    result = next(event.data["result"] for event in events if event.kind == "tool_result")
+    assert result.content == "redacted"
+    assert events[-1].data["reason"] == "hook_stop"
+    assert harness.tool_executor is not None
+    assert harness.execution_env.read_file("note.txt") == "saved"
+
+
+def test_hook_result_cannot_change_tool_call_identity(tmp_path: Path):
+    from harness.hooks import ToolHookDecision, ToolLoopHooks
+
+    registry = ToolRegistry([WriteFileTool()])
+    context = ToolContext(LocalExecutionEnv(tmp_path), AllowAllPermissions())
+    def rewrite(ctx):
+        return ToolHookDecision(action="replace_result", result=type(ctx.result)("other", "other", "changed", False))
+    executor = ToolExecutor(registry, context, ToolLoopHooks(after_tool=rewrite))
+    call = ToolCall("c1", "write", {"path": "note.txt", "content": "saved"})
+    result = next(event.data["result"] for event in executor.execute([call]) if event.kind == "tool_result")
+    assert result.tool_call_id == "c1"
+    assert result.name == "write"
+    assert result.content == "changed"
+
+
+def test_max_turns_default_and_override(tmp_path: Path):
+    from cli.main import build_parser
+    from core.loop import DEFAULT_MAX_TURNS
+
+    assert DEFAULT_MAX_TURNS == 24
+    assert LoopConfig().max_turns == 24
+    assert Harness(FakeProvider(["ready"]), str(tmp_path)).loop.config.max_turns == 24
+    assert Harness(FakeProvider(["ready"]), str(tmp_path), max_turns=3).loop.config.max_turns == 3
+    assert build_parser().parse_args(["--max-turns", "24", "hello"]).max_turns == 24
+
+
+def test_max_turns_rejects_non_positive_values():
+    with pytest.raises(ValueError, match="at least 1"):
+        LoopConfig(max_turns=0)

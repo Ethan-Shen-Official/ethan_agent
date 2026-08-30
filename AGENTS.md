@@ -41,8 +41,17 @@ src/
 │       ├── paths.py
 │       ├── codec.py
 │       ├── tree.py
+│       ├── view.py
 │       └── store.py
-└── harness/app.py
+└── harness/
+    ├── app.py
+    ├── agent_session.py
+    ├── session_manager.py
+    ├── compaction.py
+    ├── sdk.py
+    ├── hooks.py
+    ├── inspection.py
+    └── approval.py
 ```
 
 首版默认单会话、单活动运行、串行工具；`extensions/`、`bridges/`、多 Agent、多 Lane 和远程执行只保留后续扩展位置，不进入 P0。

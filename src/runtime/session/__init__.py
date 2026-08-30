@@ -15,6 +15,7 @@ from .paths import (
 from .store import JsonlSessionStore
 from .tree import SessionTree
 from .types import ActivePathSnapshot, RecordType, SessionRecord, SessionStore, SessionTreeNode
+from .view import build_session_tree_view
 
 __all__ = [
     "JsonlSessionStore",
@@ -23,6 +24,7 @@ __all__ = [
     "SessionStore",
     "SessionTreeNode",
     "SessionTree",
+    "build_session_tree_view",
     "RecordType",
     "delete_session_path",
     "default_session_path",

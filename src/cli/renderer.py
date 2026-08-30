@@ -13,3 +13,10 @@ def render(event: AgentEvent) -> None:
         print(f"\n[{event.data['reason']}]")
     elif event.kind == "error":
         print(f"\n[error] {event.data['message']}")
+    elif event.kind == "compaction_start":
+        print("\n[compaction] summarizing context...", flush=True)
+    elif event.kind == "compaction_end":
+        if event.data.get("is_error"):
+            print(f"[compaction error] {event.data.get('error', 'unknown error')}")
+        else:
+            print("[compaction] context summary saved")

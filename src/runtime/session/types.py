@@ -8,9 +8,11 @@ changing the model-facing message contract.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Literal, Protocol
 
 from core.types import Message
+
+RecordType = Literal["message", "compaction"]
 
 
 @dataclass(frozen=True)
@@ -22,8 +24,28 @@ class SessionRecord:
     message_id: str
     parent_id: str | None
     operation_id: str
-    message: Message
-    record_type: str = "message"
+    message: Message | None
+    record_type: RecordType = "message"
+    metadata: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        """Keep the discriminated record payload internally consistent."""
+        if self.record_type not in ("message", "compaction"):
+            raise ValueError(f"Unknown session record type: {self.record_type}")
+        if self.record_type == "message" and self.message is None:
+            raise ValueError("Message records must contain a message")
+        if self.record_type == "compaction" and self.message is not None:
+            raise ValueError("Compaction records cannot contain a message")
+
+
+@dataclass(frozen=True)
+class ActivePathSnapshot:
+    """One immutable view of the active branch and its derived records."""
+
+    path: tuple[SessionRecord, ...]
+    messages: tuple[Message, ...]
+    compactions: tuple[SessionRecord, ...]
+    latest_compaction: SessionRecord | None
 
 
 class SessionStore(Protocol):
@@ -32,7 +54,13 @@ class SessionStore(Protocol):
     def append(self, message: Message) -> None:
         ...
 
+    def append_compaction(self, metadata: dict[str, Any]) -> None:
+        ...
+
     def read(self) -> list[Message]:
+        ...
+
+    def active_snapshot(self) -> ActivePathSnapshot:
         ...
 
     def checkout(self, message_id: str | None) -> None:

@@ -122,7 +122,7 @@ src/
 
 - Harness owns one LoopState and restores the active branch transcript from JsonlSessionStore at startup.
 - A normal launch creates a new session at .agent/sessions/<timestamp>_<12-hex-random-id>.jsonl under the workspace root. The JSONL still stores the full session_id. `--continue` resumes the most recently modified workspace session; `--session-file` or session_path selects an explicit file.
-- Each JSONL record contains session_id, message_id, parent_id, operation_id, and a serialized Message. The persisted format is append-only and versioned. A sibling `.head` file stores the active leaf; checkout/rollback moves that pointer without deleting historical records.
+- Each JSONL record contains session_id, message_id, parent_id, operation_id, and either a serialized Message or a typed compaction metadata payload. The persisted format is append-only and versioned. A sibling `.head` file stores the active leaf; checkout/rollback moves that pointer without deleting historical records.
 - Tool output is capped centrally by ToolExecutor at 2,000 lines or 50 KiB by default. File/search/list results use head truncation; exe uses tail truncation. Truncation is UTF-8 byte-safe and records metadata on ToolResult.
 - A truncated result contains an actionable notice for the model. The full source files remain unchanged; callers can use a narrower read/search request to retrieve omitted data.
 
@@ -130,6 +130,6 @@ src/
 
 The provider receives only standard Message values plus ModelRequest.system_prompt and tool schemas. Session persistence is a Harness/runtime concern and does not change the Provider contract. AgentEvent remains a transient observation stream and is not written to the transcript.
 
-The current context builder includes runtime metadata, root AGENTS.md, the active branch history, and tool schemas. History pruning, token estimation/enforcement, automatic Compact, CustomMessage projection, and interactive fork commands remain extension points rather than P0 features. REPL `/checkout` and `/rollback` only move the session leaf; they do not restore workspace files.
+The current context builder includes runtime metadata, root AGENTS.md, the active branch history, and tool schemas. Harness now supports lightweight Compact: a compaction record is appended to the active Session Tree, while the next provider request projects a summary plus messages after the cut point. Original records remain available for inspection and rollback. Token estimation, advanced turn-prefix handling, CustomMessage projection, and interactive fork commands remain extension points. REPL `/checkout` and `/rollback` only move the session leaf; they do not restore workspace files.
 
 Harness also exposes a read-only context inspection point: `InspectingProvider` captures the latest final `ModelRequest` in a thread-safe `ContextInspector`, and the CLI `/show_context` command renders it. The default view redacts sensitive values; `/show_context --raw` is an explicit local debugging mode. Inspection snapshots are transient and are not appended to `SessionStore`.

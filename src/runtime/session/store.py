@@ -12,7 +12,7 @@ from core.errors import SessionError
 from core.types import Message
 from .codec import decode_message, encode_message
 from .tree import SessionTree
-from .types import SessionRecord
+from .types import ActivePathSnapshot, RecordType, SessionRecord
 
 
 class JsonlSessionStore:
@@ -40,6 +40,7 @@ class JsonlSessionStore:
         self.operation_id = operation_id or uuid.uuid4().hex
         parsed = self._parse_records(records)
         self._tree = SessionTree(parsed, self._load_head())
+        self._active_snapshot: ActivePathSnapshot | None = None
 
     @property
     def current_leaf_id(self) -> str | None:
@@ -77,10 +78,46 @@ class JsonlSessionStore:
             message,
         )
         self._tree.add(parsed)
+        self._invalidate_active_snapshot()
+        self._write_head()
+
+    def append_compaction(self, metadata: dict[str, Any]) -> None:
+        """Append a non-message compaction marker without deleting history."""
+        message_id = uuid.uuid4().hex
+        record = {
+            "version": self.version,
+            "type": "compaction",
+            "session_id": self.session_id,
+            "message_id": message_id,
+            "parent_id": self._tree.leaf_id,
+            "operation_id": self.operation_id,
+            "metadata": dict(metadata),
+        }
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        try:
+            with self.path.open("a", encoding="utf-8", newline="") as handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise SessionError(f"Could not append compaction record: {exc}") from exc
+        self._tree.add(
+            SessionRecord(
+                self.version,
+                self.session_id,
+                message_id,
+                self._tree.leaf_id,
+                self.operation_id,
+                None,
+                "compaction",
+                dict(metadata),
+            )
+        )
+        self._invalidate_active_snapshot()
         self._write_head()
 
     def read(self) -> list[Message]:
-        return [record.message for record in self.current_path() if record.message is not None]
+        return list(self.active_snapshot().messages)
 
     def read_all(self) -> list[SessionRecord]:
         return self._tree.all_records()
@@ -89,7 +126,24 @@ class JsonlSessionStore:
         return self._tree.get_record(message_id)
 
     def current_path(self) -> list[SessionRecord]:
-        return self._tree.current_path()
+        return list(self.active_snapshot().path)
+
+    def compactions(self) -> list[SessionRecord]:
+        return list(self.active_snapshot().compactions)
+
+    def active_snapshot(self) -> ActivePathSnapshot:
+        """Return one cached active-branch view for all read-side consumers."""
+        if self._active_snapshot is None:
+            path = tuple(self._tree.current_path())
+            messages = tuple(record.message for record in path if record.message is not None)
+            compactions = tuple(record for record in path if record.record_type == "compaction")
+            self._active_snapshot = ActivePathSnapshot(
+                path,
+                messages,
+                compactions,
+                compactions[-1] if compactions else None,
+            )
+        return self._active_snapshot
 
     def children(self, message_id: str) -> list[SessionRecord]:
         return self._tree.children(message_id)
@@ -102,10 +156,15 @@ class JsonlSessionStore:
 
     def checkout(self, message_id: str | None) -> None:
         self._tree.checkout(message_id)
+        self._invalidate_active_snapshot()
         self._write_head()
 
     def rollback(self, message_id: str | None = None) -> None:
         self._tree.rollback(message_id)
+        self._invalidate_active_snapshot()
+
+    def _invalidate_active_snapshot(self) -> None:
+        self._active_snapshot = None
 
     def _load_head(self) -> str | None:
         if not self.head_path.is_file():
@@ -128,6 +187,10 @@ class JsonlSessionStore:
         parsed: list[SessionRecord] = []
         for record in records:
             try:
+                raw_type = record.get("type", "message")
+                if raw_type not in ("message", "compaction"):
+                    raise ValueError(f"Unknown session record type: {raw_type}")
+                record_type: RecordType = raw_type
                 parsed.append(
                     SessionRecord(
                         int(record.get("version", self.version)),
@@ -135,8 +198,9 @@ class JsonlSessionStore:
                         str(record["message_id"]),
                         record.get("parent_id"),
                         str(record["operation_id"]),
-                        decode_message(record["message"]),
-                        str(record.get("type", "message")),
+                        decode_message(record["message"]) if record_type == "message" else None,
+                        record_type,
+                        dict(record.get("metadata") or {}) or None,
                     )
                 )
             except (KeyError, TypeError, ValueError) as exc:
@@ -157,7 +221,7 @@ class JsonlSessionStore:
                         raise SessionError(f"Invalid session JSON at line {number}: {exc.msg}") from exc
                     if not isinstance(record, dict):
                         raise SessionError(f"Invalid session record at line {number}")
-                    if "message" not in record:
+                    if record.get("type", "message") == "message" and "message" not in record:
                         raise SessionError(f"Missing message in session record at line {number}")
                     yield record
         except OSError as exc:

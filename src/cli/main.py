@@ -48,9 +48,22 @@ def build_parser() -> argparse.ArgumentParser:
 def handle_repl_command(command: str, harness: Harness) -> bool:
     """Handle local session commands without entering the model loop."""
     parts = command.strip().split()
-    if not parts or parts[0] not in {"/checkout", "/rollback", "/show_context"}:
+    if not parts or parts[0] not in {"/checkout", "/rollback", "/show_context", "/compact"}:
         return False
     name = parts[0]
+    if name == "/compact":
+        if len(parts) > 1:
+            print("usage: /compact")
+            return True
+        try:
+            result = harness.compact()
+            if result is None:
+                print("[compact] context is below the configured threshold")
+            else:
+                print(f"[compact] summarized {result.summarized_count} messages; kept {result.kept_count}")
+        except (ProviderError, SessionError) as exc:
+            print(f"[compact error] {exc}", file=sys.stderr)
+        return True
     if name == "/show_context":
         if len(parts) > 2 or (len(parts) == 2 and parts[1] not in {"--raw", "raw"}):
             print("usage: /show_context [--raw]")

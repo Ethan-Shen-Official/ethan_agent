@@ -48,6 +48,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("/rollback", ("/rb",), "/rollback [message-id]", "Move the active branch to a previous boundary."),
     CommandSpec("/show_context", ("/context", "/ctx"), "/show_context [--raw]", "Show the latest provider context snapshot."),
     CommandSpec("/compact", ("/cmp",), "/compact", "Compact older messages in the active session."),
+    CommandSpec("/abort", ("/stop",), "/abort", "Abort the active agent task."),
     CommandSpec("/permission_mode", ("/perm",), "/permission_mode [default|accept_edits|bypass_permissions]", "Show or change the permission mode."),
     CommandSpec("/exit", ("/quit", "/q"), "/exit", "Exit the interactive agent."),
 )
@@ -101,6 +102,16 @@ def handle_repl_command(command: str, harness: "Harness") -> bool:
             return True
         return False
     name = spec.name
+
+    if name == "/abort":
+        if len(parts) != 1:
+            print("usage: /abort")
+        elif not harness.is_running:
+            print("[abort] no active task")
+        else:
+            harness.abort()
+            print("[abort] requested")
+        return True
 
     if name == "/help":
         if len(parts) > 2:

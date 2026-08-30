@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from core.hooks import ToolHookDecision
 from core.types import ToolCall
 from harness.app import Harness
@@ -11,6 +13,7 @@ from tools.base import ToolContext
 from tools.executor import ToolExecutor
 from tools.filesystem import ReadFileTool, WriteFileTool
 from tools.registry import ToolRegistry
+from tools.shell import ShellTool
 
 
 def _result(executor: ToolExecutor, call: ToolCall):
@@ -93,6 +96,38 @@ def test_workspace_wide_delete_blacklist_applies_to_every_mode():
             decision = policy.check("exe", {"cmd": command})
             assert decision.behavior == "deny", (mode, command, decision)
             assert decision.rule == "destructive-command"
+
+
+def test_batch_loop_delete_blacklist_covers_dynamic_targets():
+    command = (
+        "for /f \"delims=\" %i in ('dir /a /b') do @if exist "
+        "\"%i\\\\.\" (rmdir /s /q \"%i\") else (del /a /f /q \"%i\")"
+    )
+    for mode in ("default", "accept_edits", "bypass_permissions"):
+        decision = WorkspacePermissionPolicy(mode).check("exe", {"cmd": command})
+        assert decision.behavior == "deny"
+        assert decision.rule == "destructive-command"
+
+
+def test_execution_boundary_blocks_metadata_and_batch_deletes(tmp_path: Path):
+    env = LocalExecutionEnv(tmp_path)
+    commands = (
+        "rmdir /s /q .agent",
+        "del /f /q .git\\config",
+        "for /f \"delims=\" %i in ('dir /a /b') do del /f /q \"%i\"",
+    )
+    for command in commands:
+        with pytest.raises(PermissionError):
+            env.execute(command)
+    with pytest.raises(PermissionError):
+        env.write_file(".agent/settings.json", "blocked")
+
+
+def test_shell_tool_cannot_bypass_metadata_guard_with_allow_all(tmp_path: Path):
+    context = ToolContext(LocalExecutionEnv(tmp_path), AllowAllPermissions())
+    result = ShellTool().execute({"cmd": "rmdir /s /q .agent"}, context)
+    assert result.is_error is True
+    assert "protected workspace metadata" in result.content
 
 
 def test_custom_argument_replacement_is_checked_by_policy(tmp_path: Path):

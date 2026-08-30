@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 
 from runtime.permissions import PermissionRequest
 
@@ -11,13 +11,16 @@ from runtime.permissions import PermissionRequest
 class PromptApprovalHandler:
     """Prompt once for an operation that the permission policy marked ``ask``."""
 
+    def __init__(self, input_fn: Callable[[str], str] | None = None) -> None:
+        self._input = input_fn or input
+
     def __call__(self, request: PermissionRequest) -> bool:
         details = _display_arguments(request.arguments)
         print(f"\nPermission requested: {request.tool_name} ({request.reason})")
         if details:
             print(details)
         try:
-            answer = input("Allow this operation? [y/N] ")
+            answer = self._input("Allow this operation? [y/N] ")
         except (EOFError, KeyboardInterrupt):
             print()
             return False

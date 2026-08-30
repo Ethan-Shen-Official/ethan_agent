@@ -21,7 +21,19 @@ class ShellTool(ToolBase):
     )
 
     def run(self, arguments: dict[str, Any], context: ToolContext) -> str:
-        code, stdout, stderr = context.execution_env.execute(arguments["cmd"])
+        execute = context.execution_env.execute
+        if context.cancel_event is None:
+            code, stdout, stderr = execute(arguments["cmd"])
+        else:
+            try:
+                code, stdout, stderr = execute(
+                    arguments["cmd"], cancel_event=context.cancel_event
+                )
+            except TypeError as exc:
+                # Keep older custom ExecutionEnv implementations usable.
+                if "cancel_event" not in str(exc):
+                    raise
+                code, stdout, stderr = execute(arguments["cmd"])
         content = f"exit_code={code}\nstdout:\n{stdout}\nstderr:\n{stderr}"
         if code != 0:
             return ToolResult(self.spec.name, self.spec.name, content, True)

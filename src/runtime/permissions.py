@@ -1,8 +1,8 @@
 """Permission decisions used by the harness preflight pipeline.
 
-Permission policy is deliberately separate from :mod:`runtime.execution`:
-policy decides whether an operation may start, while the execution
-environment remains the non-bypassable capability boundary.
+The policy decides whether an operation may start.  The execution environment
+also reuses the pure shell safety predicates as a non-bypassable capability
+boundary for compatibility callers that do not install this policy.
 """
 
 from __future__ import annotations
@@ -174,6 +174,15 @@ class WorkspacePermissionPolicy:
         simple command chains; execution isolation remains the stronger future
         boundary for obfuscated or script-generated commands.
         """
+        # ``cmd.exe`` batch constructs can hide the actual delete command in
+        # a ``for`` body.  The top-level token is then only ``for``, so the
+        # regular segment parser below cannot see the operation.  Treat a
+        # directory enumeration feeding a dynamic delete target as a
+        # workspace-wide destructive command.  Exact expansion of ``%i`` is
+        # deliberately avoided; conservative rejection is the safe choice.
+        if cls._is_dynamic_batch_delete(command):
+            return True
+
         for segment in re.split(r"[;&|\n]+", command):
             if not segment.strip():
                 continue
@@ -194,6 +203,37 @@ class WorkspacePermissionPolicy:
             if name == "git" and cls._is_git_clean(tokens[1:]):
                 return True
         return False
+
+    @classmethod
+    def _is_dynamic_batch_delete(cls, command: str) -> bool:
+        """Detect destructive ``cmd.exe for`` loops with enumerated targets."""
+        lowered = command.lower()
+        if not re.search(r"\bfor\b", lowered):
+            return False
+        # Support both interactive ``%i`` and batch-file ``%%i`` variables.
+        if not re.search(r"(?<!%)%%?[a-z](?![a-z0-9])", lowered):
+            return False
+        # ``dir /b`` is the important part: it turns the loop variable into
+        # every entry in the current workspace (with or without ``/a``).
+        if not re.search(r"\bdir(?:\.exe)?\b[^()\r\n]*?/b(?:\b|\s|[)])", lowered):
+            return False
+        if not re.search(r"\bin\s*\([^)]*\bdir(?:\.exe)?\b", lowered):
+            return False
+
+        # ``rmdir /s`` is recursive; ``del /f``/``/q`` and PowerShell
+        # ``Remove-Item -Recurse -Force`` are forceful bulk deletion forms.
+        if re.search(r"\b(?:rmdir|rd)\b[^;\r\n()]*?/s\b", lowered):
+            return True
+        if re.search(r"\b(?:del|erase)\b[^;\r\n()]*?/(?:f|q)\b", lowered):
+            return True
+        return bool(
+            re.search(
+                r"\b(?:remove-item|ri)\b"
+                r"(?=[^;\r\n()]*-(?:recurse|r)\b)"
+                r"(?=[^;\r\n()]*-(?:force|f)\b)",
+                lowered,
+            )
+        )
 
     @classmethod
     def _is_recursive_force_root_delete(cls, tokens: list[str]) -> bool:
@@ -241,6 +281,26 @@ class WorkspacePermissionPolicy:
         return bool(re.fullmatch(r"[a-z]:/?", normalized))
 
 
+def is_protected_shell_command(command: str) -> bool:
+    """Return whether a shell command mentions protected runtime metadata.
+
+    This helper is also used by :class:`LocalExecutionEnv` as a final
+    capability check, so callers that intentionally use ``AllowAllPermissions``
+    cannot mutate ``.agent`` or ``.git`` through a literal shell path.
+    """
+    return bool(
+        re.search(
+            r"(?i)(?<![A-Za-z0-9_.-])(?:\.agent|\.git)(?![A-Za-z0-9_.-])",
+            command,
+        )
+    )
+
+
+def is_destructive_shell_command(command: str) -> bool:
+    """Expose the conservative shell blacklist to execution boundaries."""
+    return WorkspacePermissionPolicy._is_destructive_shell_command(command)
+
+
 __all__ = [
     "AllowAllPermissions",
     "ApprovalHandler",
@@ -251,4 +311,6 @@ __all__ = [
     "PERMISSION_MODES",
     "PermissionRequest",
     "WorkspacePermissionPolicy",
+    "is_destructive_shell_command",
+    "is_protected_shell_command",
 ]

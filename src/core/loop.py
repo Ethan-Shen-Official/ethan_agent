@@ -62,6 +62,9 @@ class AgentLoop:
             except Exception as exc:
                 provider_error = str(exc)
             assistant = Message.assistant("".join(text_parts), calls)
+            if state.cancelled or state.cancel_event.is_set():
+                yield self._finish(state, "cancelled")
+                return
             if provider_error:
                 yield AgentEvent("error", {"message": provider_error})
                 yield self._finish(state, "provider_error")
@@ -76,6 +79,9 @@ class AgentLoop:
             state.messages.append(assistant)
             results = []
             terminate_after_tools = False
+            if state.cancelled or state.cancel_event.is_set():
+                yield self._finish(state, "cancelled")
+                return
             for event in self.tool_executor.execute(calls):
                 yield event
                 if event.kind == "tool_result":

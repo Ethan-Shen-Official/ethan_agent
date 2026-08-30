@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
-from core.errors import ProviderError,SessionError
+from core.errors import ProviderError, SessionError
 from core.loop import AgentLoop
 from core.types import AgentEvent
 from runtime.execution import LocalExecutionEnv
@@ -21,6 +22,44 @@ from .compaction import CompactionService
 from .hooks import ToolLoopHooks
 from .inspection import ContextInspector, ContextSnapshot
 from .session_manager import SessionManager
+
+
+class _RunEvents:
+    """Closable iterator that releases a reserved run slot even if unused."""
+
+    def __init__(self, factory, release) -> None:
+        self._factory = factory
+        self._release = release
+        self._iterator = None
+        self._closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed:
+            raise StopIteration
+        if self._iterator is None:
+            self._iterator = self._factory()
+        try:
+            return next(self._iterator)
+        except StopIteration:
+            self.close()
+            raise
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._iterator is not None:
+            self._iterator.close()
+        self._release()
+
+    def __del__(self):
+        self.close()
 
 
 class AgentSession:
@@ -48,11 +87,18 @@ class AgentSession:
         self.context_builder = context_builder
         self.compaction = compaction
         self.loop = loop
+        self._run_lock = threading.Lock()
+        self._abort_pending = False
         self.compaction.restore()
 
     @property
     def state(self):
         return self.session.state
+
+    @property
+    def is_running(self) -> bool:
+        """Whether one prompt currently owns the session run slot."""
+        return self._run_lock.locked()
 
     @property
     def session_store(self) -> SessionStore:
@@ -116,12 +162,34 @@ class AgentSession:
         return result
 
     def prompt(self, text: str):
-        for event in self.loop.run(text, self.state):
+        """Start one prompt and return its event iterator.
+
+        Acquiring the slot before returning the iterator closes the small
+        generator-laziness race where an abort could arrive before
+        ``LoopState.begin_run`` reset the cancellation flag.
+        """
+        if not self._run_lock.acquire(blocking=False):
+            raise SessionError("agent is already running")
+        self._abort_pending = False
+
+        def events():
+            self.tool_executor.bind_cancel_event(self.state.cancel_event)
+            first_event = True
+            for event in self.loop.run(text, self.state):
+                self.session.persist_pending()
+                yield event
+                if first_event:
+                    first_event = False
+                    if self._abort_pending:
+                        self.state.request_cancel()
             self.session.persist_pending()
-            yield event
-        self.session.persist_pending()
-        if self.state.stop_reason == "completed":
-            yield from self._auto_compact()
+            if self.state.stop_reason == "completed":
+                yield from self._auto_compact()
+        return _RunEvents(events, self._release_run)
+
+    def _release_run(self) -> None:
+        self._abort_pending = False
+        self._run_lock.release()
 
     def _auto_compact(self):
         """Run threshold compaction after a completed turn, outside the core loop."""
@@ -142,7 +210,17 @@ class AgentSession:
             )
 
     def abort(self) -> None:
-        self.state.request_cancel()
+        if self.is_running:
+            self._abort_pending = True
+            self.state.request_cancel()
+            abort = getattr(self.provider, "abort", None)
+            if callable(abort):
+                try:
+                    abort()
+                except Exception:
+                    # Cancellation must remain best-effort even if an adapter
+                    # cannot close its transport cleanly.
+                    pass
 
     def checkout(self, message_id: str | None) -> None:
         """Switch the active session branch and reload LoopState from it."""

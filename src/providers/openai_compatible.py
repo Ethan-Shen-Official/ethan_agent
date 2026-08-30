@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -64,6 +65,20 @@ class OpenAICompatibleConfig:
 class OpenAICompatibleProvider:
     def __init__(self, config: OpenAICompatibleConfig) -> None:
         self.config = config
+        self._active_response = None
+        self._abort_event = threading.Event()
+        self._response_lock = threading.Lock()
+
+    def abort(self) -> None:
+        """Close the active HTTP stream when the Harness requests cancellation."""
+        self._abort_event.set()
+        with self._response_lock:
+            response = self._active_response
+        if response is not None:
+            try:
+                response.close()
+            except OSError:
+                pass
 
     @classmethod
     def from_environment(cls, dotenv_path: str | os.PathLike[str] = ".env") -> "OpenAICompatibleProvider":
@@ -83,13 +98,22 @@ class OpenAICompatibleProvider:
         return cls(OpenAICompatibleConfig(api_key, base_url, model, timeout))
 
     def stream(self, request: ModelRequest):
+        if self._abort_event.is_set():
+            self._abort_event.clear()
+            return
         payload: dict[str, Any] = {"model": self.config.model, "messages": self._messages(request), "stream": True}
         if request.tools:
             payload["tools"] = [_tool_payload(spec) for spec in request.tools]
         http_request = urllib.request.Request(_endpoint(self.config.base_url), data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers={"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json", "Accept": "text/event-stream", "User-Agent": "coding-agent/0.1"}, method="POST")
         try:
             with urllib.request.urlopen(http_request, timeout=self.config.timeout) as response:
-                yield from self._parse_sse(response)
+                with self._response_lock:
+                    self._active_response = response
+                try:
+                    yield from self._parse_sse(response)
+                finally:
+                    with self._response_lock:
+                        self._active_response = None
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:1000]
             raise ProviderError(f"Model API returned HTTP {exc.code}: {detail}") from exc
@@ -97,6 +121,12 @@ class OpenAICompatibleProvider:
             raise ProviderError(f"Could not connect to model API: {exc.reason}") from exc
         except TimeoutError as exc:
             raise ProviderError("Model API request timed out.") from exc
+        except Exception as exc:
+            if self._abort_event.is_set():
+                return
+            raise ProviderError(f"Model API stream failed: {exc}") from exc
+        finally:
+            self._abort_event.clear()
 
     def _messages(self, request: ModelRequest) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
@@ -108,6 +138,8 @@ class OpenAICompatibleProvider:
     def _parse_sse(self, response):
         tool_chunks: dict[int, dict[str, str]] = {}
         for raw_line in response:
+            if self._abort_event.is_set():
+                return
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line or not line.startswith("data:"):
                 continue

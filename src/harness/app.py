@@ -116,6 +116,10 @@ class Harness:
     def session_store(self) -> SessionStore:
         return self.session.store
 
+    @property
+    def is_running(self) -> bool:
+        return self.agent.is_running
+
     def permission_mode(self) -> PermissionMode:
         if self.permission_policy is None:
             raise SessionError("configured permission manager does not expose a mutable mode")
@@ -166,7 +170,7 @@ class Harness:
         return self.agent.compact(force=force)
 
     def prompt(self, text: str):
-        yield from self.agent.prompt(text)
+        return self.agent.prompt(text)
 
     def abort(self) -> None:
         self.agent.abort()

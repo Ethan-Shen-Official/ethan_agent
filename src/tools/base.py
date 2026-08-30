@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import threading
 from typing import Any, Protocol
 
 from core.errors import format_tool_error
@@ -19,6 +20,7 @@ class ToolContext:
 
     execution_env: Any
     permission_manager: Any = None
+    cancel_event: threading.Event | None = None
 
 
 class Tool(Protocol):

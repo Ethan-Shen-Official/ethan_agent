@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import threading
 from time import perf_counter
 
 from core.errors import ToolError, format_tool_error
@@ -42,25 +43,40 @@ class ToolExecutor:
         self.hooks = hooks
         self.output_limits = output_limits or ToolOutputLimits()
 
+    def bind_cancel_event(self, cancel_event: threading.Event | None) -> None:
+        """Bind the cancellation event for the one active Harness run."""
+        self.context = replace(self.context, cancel_event=cancel_event)
+
     def execute(self, calls):
         for call in calls:
             yield AgentEvent(
                 "tool_start",
                 {"id": call.id, "name": call.name, "arguments": call.arguments},
             )
-            tool = self.registry.get(call.name)
-            if tool is None:
+            if self.context.cancel_event is not None and self.context.cancel_event.is_set():
                 result = self._error_result(
                     call,
                     ToolError(
-                        f"unknown tool: {call.name}",
-                        code="unknown_tool",
+                        "tool execution cancelled",
+                        code="cancelled",
                         retryable=False,
                     ),
                 )
                 terminate = False
             else:
-                result, terminate = self._execute_single(tool, call)
+                tool = self.registry.get(call.name)
+                if tool is None:
+                    result = self._error_result(
+                        call,
+                        ToolError(
+                            f"unknown tool: {call.name}",
+                            code="unknown_tool",
+                            retryable=False,
+                        ),
+                    )
+                    terminate = False
+                else:
+                    result, terminate = self._execute_single(tool, call)
             yield AgentEvent("tool_result", {"result": result, "terminate": terminate})
             yield AgentEvent("tool_progress", {"id": call.id, "complete": True})
 

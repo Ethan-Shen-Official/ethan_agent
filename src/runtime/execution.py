@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
+
+from .permissions import is_destructive_shell_command, is_protected_shell_command
 
 
 class ExecutionEnv:
@@ -34,7 +39,11 @@ class ExecutionEnv:
     ) -> list[str]:
         raise NotImplementedError
 
-    def execute(self, command: str) -> tuple[int, str, str]:
+    def execute(
+        self,
+        command: str,
+        cancel_event: threading.Event | None = None,
+    ) -> tuple[int, str, str]:
         raise NotImplementedError
 
 
@@ -64,6 +73,7 @@ class LocalExecutionEnv(ExecutionEnv):
 
     def write_file(self, path: str, content: str) -> None:
         target = self._path(path)
+        self._assert_mutable_path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         self._atomic_write_text(target, content)
 
@@ -73,6 +83,7 @@ class LocalExecutionEnv(ExecutionEnv):
         if not old_text:
             raise ValueError("old_text must not be empty")
         target = self._path(path)
+        self._assert_mutable_path(target)
         content = target.read_text(encoding="utf-8")
         matches = content.count(old_text)
         if matches == 0:
@@ -167,27 +178,91 @@ class LocalExecutionEnv(ExecutionEnv):
                 except FileNotFoundError:
                     pass
 
-    def execute(self, command: str) -> tuple[int, str, str]:
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=self.cwd,
-                shell=True,
-                text=True,
-                capture_output=True,
-                timeout=self.command_timeout,
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-            stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
-            return 124, stdout, f"command timed out after {self.command_timeout:g}s\n{stderr}"
+    def _assert_mutable_path(self, path: str | os.PathLike[str]) -> None:
+        """Keep runtime and repository metadata immutable for tool writes."""
+        normalized = str(path).replace("\\", "/").strip("/").lower()
+        parts = {part for part in normalized.split("/") if part not in {"", ".", ".."}}
+        if parts & {".agent", ".git"}:
+            raise PermissionError("protected workspace metadata cannot be modified")
+
+    def execute(
+        self,
+        command: str,
+        cancel_event: threading.Event | None = None,
+    ) -> tuple[int, str, str]:
+        # This check is deliberately below the permission-policy layer.  It
+        # protects direct/compatibility callers that use AllowAllPermissions,
+        # and catches the same batch-loop patterns before ``cmd.exe`` starts.
+        if is_destructive_shell_command(command):
+            raise PermissionError("destructive workspace-wide command is blocked")
+        if is_protected_shell_command(command):
+            raise PermissionError("protected workspace metadata cannot be modified")
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        process = subprocess.Popen(
+            command,
+            cwd=self.cwd,
+            shell=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=creationflags,
+        )
+        deadline = time.monotonic() + self.command_timeout
+        cancelled = False
+        while process.poll() is None:
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                self._terminate_process(process)
+                break
+            if time.monotonic() >= deadline:
+                self._terminate_process(process)
+                stdout, stderr = self._communicate_after_stop(process)
+                stderr = f"command timed out after {self.command_timeout:g}s\n{stderr or ''}"
+                return 124, stdout or "", stderr
+            try:
+                process.wait(timeout=0.05)
+            except subprocess.TimeoutExpired:
+                continue
+        stdout, stderr = self._communicate_after_stop(process) if cancelled else process.communicate()
+        if cancelled:
+            stderr = f"command cancelled\n{stderr or ''}"
+            return 130, stdout or "", stderr
         # Preserve the end of process output so ToolExecutor can apply its
         # user-facing tail truncation without losing the final diagnostics.
         return (
-            completed.returncode,
-            self._limit_output(completed.stdout, from_end=True),
-            self._limit_output(completed.stderr, from_end=True),
+            process.returncode,
+            self._limit_output(stdout or "", from_end=True),
+            self._limit_output(stderr or "", from_end=True),
         )
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            if os.name == "nt":
+                process.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                process.terminate()
+            process.wait(timeout=0.5)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _communicate_after_stop(process: subprocess.Popen) -> tuple[str, str]:
+        """Collect output briefly, then avoid waiting on an escaped child."""
+        try:
+            stdout, stderr = process.communicate(timeout=0.5)
+            return stdout or "", stderr or ""
+        except subprocess.TimeoutExpired:
+            pass
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+        return "", "process did not close its output pipes after termination"
     def _limit_output(self, output: str, *, from_end: bool = False) -> str:
         encoded = output.encode("utf-8", errors="replace")
         if len(encoded) <= self.max_output_bytes:

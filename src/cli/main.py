@@ -10,6 +10,7 @@ from harness.approval import PromptApprovalHandler
 from providers.openai_compatible import OpenAICompatibleProvider
 from runtime.permissions import PERMISSION_MODES
 from .commands import handle_repl_command, is_exit_command
+from .repl import ApprovalBroker, create_approval_handler, run_repl
 from .renderer import render
 
 
@@ -60,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     except ProviderError as exc:
         print(f"[provider error] {exc}", file=sys.stderr)
         return 2
+    approval_broker = None if args.prompt else ApprovalBroker()
     harness = Harness(
         provider,
         args.cwd,
@@ -67,26 +69,17 @@ def main(argv: list[str] | None = None) -> int:
         session_path=args.session_file,
         resume=args.continue_session,
         permission_mode=args.permission_mode,
-        approval_handler=PromptApprovalHandler(),
+        approval_handler=(
+            PromptApprovalHandler()
+            if approval_broker is None
+            else create_approval_handler(approval_broker)
+        ),
     )
     if args.prompt:
         for event in harness.prompt(args.prompt):
             render(event)
         return 0
-    while True:
-        try:
-            prompt = input("agent> ")
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 0
-        if prompt.strip() == "":
-            continue
-        if is_exit_command(prompt):
-            return 0
-        if handle_repl_command(prompt, harness):
-            continue
-        for event in harness.prompt(prompt):
-            render(event)
+    return run_repl(harness, approval_broker)
 
 
 if __name__ == "__main__":

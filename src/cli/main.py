@@ -6,6 +6,7 @@ import sys
 from core.errors import ProviderError, SessionError
 from core.loop import DEFAULT_MAX_TURNS
 from harness.app import Harness
+from harness.inspection import format_context_snapshot
 from providers.openai_compatible import OpenAICompatibleProvider
 from .renderer import render
 
@@ -47,9 +48,19 @@ def build_parser() -> argparse.ArgumentParser:
 def handle_repl_command(command: str, harness: Harness) -> bool:
     """Handle local session commands without entering the model loop."""
     parts = command.strip().split()
-    if not parts or parts[0] not in {"/checkout", "/rollback"}:
+    if not parts or parts[0] not in {"/checkout", "/rollback", "/show_context"}:
         return False
     name = parts[0]
+    if name == "/show_context":
+        if len(parts) > 2 or (len(parts) == 2 and parts[1] not in {"--raw", "raw"}):
+            print("usage: /show_context [--raw]")
+            return True
+        snapshot = harness.context_snapshot()
+        if snapshot is None:
+            print("[show_context] no model request has been sent yet")
+            return True
+        print(format_context_snapshot(snapshot, redact=len(parts) == 1))
+        return True
     if len(parts) > 2 or (name == "/checkout" and len(parts) != 2):
         usage = f"usage: {name} <message-id>" if name == "/checkout" else "usage: /rollback [message-id]"
         print(usage)

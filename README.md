@@ -29,8 +29,12 @@ REPL 中的会话命令：
 
 - `/checkout <message-id>`：切换到指定消息节点；支持唯一 ID 前缀。
 - `/rollback [message-id]`：带 ID 时切换到指定节点；不带 ID 时回退当前用户任务之前的安全边界。
+- `/show_context`：显示最近一次实际发送给模型的完整上下文快照，敏感值默认脱敏。
+- `/show_context --raw`：在本地调试时显示未脱敏快照。
 
 这些命令只回滚消息上下文，不撤销工具已经产生的文件或 Shell 副作用。
+
+`/show_context` 是 Harness 层的只读诊断能力。它通过 Provider 观察器捕获最终 `ModelRequest`，包含 system prompt、消息和工具 Schema，不修改 Agent Loop，也不会写入 SessionStore。
 
 ## 架构
 

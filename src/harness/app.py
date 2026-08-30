@@ -15,6 +15,7 @@ from tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, SearchTool
 from tools.registry import ToolRegistry
 from tools.shell import ShellTool
 from .hooks import ToolLoopHooks
+from .inspection import ContextInspector, ContextSnapshot, InspectingProvider
 
 
 class Harness:
@@ -30,6 +31,7 @@ class Harness:
         tool_output_limits: ToolOutputLimits | None = None,
     ) -> None:
         self.execution_env = LocalExecutionEnv(cwd)
+        self.context_inspector = ContextInspector()
         if session_store is not None:
             self.session_store = session_store
         else:
@@ -61,8 +63,9 @@ class Harness:
             self.hooks,
             output_limits=tool_output_limits,
         )
+        observed_provider = InspectingProvider(provider, self.context_inspector)
         self.loop = AgentLoop(
-            provider,
+            observed_provider,
             self.tool_executor,
             self.registry.specs(),
             LoopConfig(max_turns=max_turns),
@@ -71,6 +74,10 @@ class Harness:
                 model_name=getattr(getattr(provider, "config", None), "model", "unknown"),
             ),
         )
+
+    def context_snapshot(self) -> ContextSnapshot | None:
+        """Return the latest exact provider request for read-only diagnostics."""
+        return self.context_inspector.snapshot()
 
     def prompt(self, text: str):
         for event in self.loop.run(text, self.state):

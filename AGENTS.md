@@ -131,3 +131,5 @@ src/
 The provider receives only standard Message values plus ModelRequest.system_prompt and tool schemas. Session persistence is a Harness/runtime concern and does not change the Provider contract. AgentEvent remains a transient observation stream and is not written to the transcript.
 
 The current context builder includes runtime metadata, root AGENTS.md, the active branch history, and tool schemas. History pruning, token estimation/enforcement, automatic Compact, CustomMessage projection, and interactive fork commands remain extension points rather than P0 features. REPL `/checkout` and `/rollback` only move the session leaf; they do not restore workspace files.
+
+Harness also exposes a read-only context inspection point: `InspectingProvider` captures the latest final `ModelRequest` in a thread-safe `ContextInspector`, and the CLI `/show_context` command renders it. The default view redacts sensitive values; `/show_context --raw` is an explicit local debugging mode. Inspection snapshots are transient and are not appended to `SessionStore`.

@@ -116,6 +116,48 @@ class JsonlSessionStore:
         self._invalidate_active_snapshot()
         self._write_head()
 
+    def append_session_info(self, name: str) -> None:
+        """Append the display name for this session.
+
+        Session names are metadata, not model messages. Appending instead of
+        rewriting keeps the JSONL log append-only and lets the latest record
+        override an earlier name (an empty name clears it).
+        """
+        if not isinstance(name, str):
+            raise SessionError("Session name must be text")
+        message_id = uuid.uuid4().hex
+        record = {
+            "version": self.version,
+            "type": "session_info",
+            "session_id": self.session_id,
+            "message_id": message_id,
+            "parent_id": self._tree.leaf_id,
+            "operation_id": self.operation_id,
+            "metadata": {"name": name},
+        }
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        try:
+            with self.path.open("a", encoding="utf-8", newline="") as handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise SessionError(f"Could not append session info: {exc}") from exc
+        self._tree.add(
+            SessionRecord(
+                self.version,
+                self.session_id,
+                message_id,
+                self._tree.leaf_id,
+                self.operation_id,
+                None,
+                "session_info",
+                {"name": name},
+            )
+        )
+        self._invalidate_active_snapshot()
+        self._write_head()
+
     def read(self) -> list[Message]:
         return list(self.active_snapshot().messages)
 
@@ -130,6 +172,15 @@ class JsonlSessionStore:
 
     def compactions(self) -> list[SessionRecord]:
         return list(self.active_snapshot().compactions)
+
+    def get_session_name(self) -> str | None:
+        """Return the latest name on the active branch, if one is set."""
+        for record in reversed(self.active_snapshot().path):
+            if record.record_type != "session_info":
+                continue
+            value = (record.metadata or {}).get("name")
+            return value.strip() if isinstance(value, str) and value.strip() else None
+        return None
 
     def active_snapshot(self) -> ActivePathSnapshot:
         """Return one cached active-branch view for all read-side consumers."""
@@ -188,9 +239,10 @@ class JsonlSessionStore:
         for record in records:
             try:
                 raw_type = record.get("type", "message")
-                if raw_type not in ("message", "compaction"):
+                if raw_type not in ("message", "compaction", "session_info"):
                     raise ValueError(f"Unknown session record type: {raw_type}")
                 record_type: RecordType = raw_type
+                metadata = dict(record.get("metadata") or {}) or None
                 parsed.append(
                     SessionRecord(
                         int(record.get("version", self.version)),
@@ -200,7 +252,7 @@ class JsonlSessionStore:
                         str(record["operation_id"]),
                         decode_message(record["message"]) if record_type == "message" else None,
                         record_type,
-                        dict(record.get("metadata") or {}) or None,
+                        metadata,
                     )
                 )
             except (KeyError, TypeError, ValueError) as exc:

@@ -27,6 +27,12 @@ REPL：
 
 REPL 中的会话命令：
 
+- `/help [command]`：显示所有命令，或查看单个命令的用法；简写为 `/h`、`/?`。
+- `/new`：创建并切换到新的空会话；简写为 `/n`。
+- `/name [name]`：查看、设置或清除当前会话显示名称（使用 `/name -` 清除）；简写为 `/nm`。
+- `/resume [session-id]`：带参数时按会话 ID、文件名或唯一前缀切换；不带参数时列出会话并按编号或短 ID 选择；简写为 `/res`。
+- `/drop <session-id>`：经确认后永久删除指定的非当前会话；当前会话不能删除。
+- `/tree`：显示当前会话的树状节点、短 ID、角色预览和活动路径；简写为 `/t`。
 - `/checkout <message-id>`：切换到指定消息节点；支持唯一 ID 前缀。
 - `/rollback [message-id]`：带 ID 时切换到指定节点；不带 ID 时回退当前用户任务之前的安全边界。
 - `/show_context`：显示最近一次实际发送给模型的完整上下文快照，敏感值默认脱敏。
@@ -35,6 +41,7 @@ REPL 中的会话命令：
 - `/permission_mode`：显示当前权限模式。
 - `/permission_mode <mode>`：切换后续工具调用的权限模式，可选 `default`、`accept_edits` 或 `bypass_permissions`。
 - `/perm [d|e|b]`：权限模式简写；`d=default`、`e=accept_edits`、`b=bypass_permissions`。
+- `/exit`：退出 REPL；简写为 `/quit`、`/q`。
 
 这些命令只回滚消息上下文，不撤销工具已经产生的文件或 Shell 副作用。Compact 同样不会删除原始 Session 记录。
 
@@ -98,9 +105,9 @@ ToolExecutor 统一限制工具结果，默认上限为 2,000 行或 50 KiB，�
 - 当前会话历史；
 - 当前工具 Schema。
 
-Harness 启动时从 JsonlSessionStore 恢复当前活动分支；运行过程中按消息追加持久化。默认每次启动创建 `.agent/sessions/<timestamp>_<12位随机ID>.jsonl`，`--continue` 才恢复最近会话，`--session-file` 可打开指定会话。每个 JSONL 记录包含 session_id、message_id、parent_id 和 operation_id；Compact 还会追加一条带 `type=compaction` 的摘要元数据记录。旁边的 `.head` 文件记录当前叶节点。通过 SessionStore 的 `checkout`/`rollback` 可以切换到已有历史节点，不删除旧分支；交互式 `/fork` 命令暂未加入。
+Harness 启动时从 JsonlSessionStore 恢复当前活动分支；运行过程中按消息追加持久化。默认每次启动创建 `.agent/sessions/<timestamp>_<12位随机ID>.jsonl`，`--continue` 才恢复最近会话，`--session-file` 可打开指定会话。每个 JSONL 记录包含 session_id、message_id、parent_id 和 operation_id；Compact 会追加 `type=compaction` 摘要记录，会话重命名会追加 `type=session_info` 元数据记录。旁边的 `.head` 文件记录当前叶节点。通过 SessionStore 的 `checkout`/`rollback` 可以切换到已有历史节点，不删除旧分支；交互式 `/fork` 命令暂未加入。
 
-当前已实现活动分支历史重放和不删除历史的 checkout/rollback API、REPL 中的 `/checkout` 和 `/rollback`，以及手动 `/compact` 和阈值触发的轻量 Compact；尚未实现历史裁剪、精确 Token 预算、完整 turn-prefix Compact、CustomMessage、交互式 `/fork` 命令和多会话管理。
+当前已实现活动分支历史重放和不删除历史的 checkout/rollback API、REPL 命令注册表、`/help`、`/new`、`/name`、交互式或精确参数 `/resume`、带确认且仅针对非当前会话的 `/drop`、`/tree`、`/checkout` 和 `/rollback`，以及手动 `/compact` 和阈值触发的轻量 Compact；尚未实现历史裁剪、精确 Token 预算、完整 turn-prefix Compact、CustomMessage、交互式 `/fork` 命令和跨工作区会话管理。
 
 ## 测试
 

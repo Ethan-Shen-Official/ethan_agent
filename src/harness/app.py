@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from os import PathLike
+from pathlib import Path
 
 from core.context import DefaultContextBuilder
 from core.errors import ProviderError, SessionError
@@ -26,7 +27,16 @@ from runtime.permissions import (
     PermissionMode,
     WorkspacePermissionPolicy,
 )
-from runtime.session import JsonlSessionStore, SessionStore, default_session_path, latest_session_path
+from runtime.session import (
+    JsonlSessionStore,
+    SessionStore,
+    SessionTreeNode,
+    delete_session_path,
+    default_session_path,
+    latest_session_path,
+    list_session_paths,
+    resolve_session_path,
+)
 from tools.base import ToolContext
 from tools.executor import ToolExecutor, ToolOutputLimits
 from tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, SearchTool, WriteFileTool
@@ -66,7 +76,11 @@ class Harness:
                 selected_path or default_session_path(self.execution_env.cwd)
             )
         active_snapshot = self._active_snapshot()
-        restored_messages = list(active_snapshot.messages) if active_snapshot is not None else self.session_store.read()
+        restored_messages = (
+            list(active_snapshot.messages)
+            if active_snapshot is not None
+            else self.session_store.read()
+        )
         self.state = LoopState(messages=restored_messages)
         self._persisted_message_count = len(restored_messages)
         self._token_ledger = TokenLedger.from_messages(restored_messages)
@@ -137,6 +151,162 @@ class Harness:
             self.permission_policy.set_mode(mode)
         except ValueError as exc:
             raise SessionError(str(exc)) from exc
+
+    @property
+    def session_id(self) -> str:
+        """Return the identifier of the currently active session."""
+        value = getattr(self.session_store, "session_id", None)
+        if not isinstance(value, str) or not value:
+            raise SessionError("configured session store does not expose a session id")
+        return value
+
+    @property
+    def session_path(self) -> Path:
+        """Return the persisted file of the currently active session."""
+        value = getattr(self.session_store, "path", None)
+        if value is None:
+            raise SessionError("configured session store does not expose a session path")
+        return value
+
+    @property
+    def session_name(self) -> str | None:
+        """Return the current session's display name, when supported."""
+        getter = getattr(self.session_store, "get_session_name", None)
+        return getter() if getter is not None else None
+
+    def set_session_name(self, name: str) -> None:
+        """Persist a display name without adding anything to model context."""
+        append = getattr(self.session_store, "append_session_info", None)
+        if append is None:
+            raise SessionError("No active session; use /new or /resume first")
+        append(name.strip())
+
+    def session_catalog(self) -> list[dict[str, object]]:
+        """Return lightweight metadata for the workspace session selector."""
+        catalog: list[dict[str, object]] = []
+        for path in list_session_paths(self.execution_env.cwd):
+            store = JsonlSessionStore(path)
+            messages = store.read()
+            first_user = next(
+                (message.content for message in messages if message.role == "user"),
+                "",
+            )
+            catalog.append(
+                {
+                    "path": path,
+                    "id": store.session_id if store.read_all() else path.stem,
+                    "name": store.get_session_name(),
+                    "first_prompt": first_user,
+                    "modified": path.stat().st_mtime,
+                }
+            )
+        return catalog
+
+    def session_tree(self) -> list[SessionTreeNode]:
+        """Return a stable, read-only view of the current session tree."""
+        read_all = getattr(self.session_store, "read_all", None)
+        current_path = getattr(self.session_store, "current_path", None)
+        if read_all is None or current_path is None:
+            raise SessionError("Configured session store does not support tree inspection")
+        records = list(read_all())
+        active_ids = {record.message_id for record in current_path()}
+        known_ids = {record.message_id for record in records}
+        children: dict[str | None, list] = {}
+        for record in records:
+            parent = record.parent_id if record.parent_id in known_ids else None
+            children.setdefault(parent, []).append(record)
+
+        nodes: list[SessionTreeNode] = []
+
+        def visit(parent_id: str | None, depth: int) -> None:
+            siblings = children.get(parent_id, [])
+            for record in siblings:
+                nodes.append(
+                    SessionTreeNode(
+                        record.message_id,
+                        record.parent_id,
+                        record.record_type,
+                        self._tree_node_role(record),
+                        self._tree_node_preview(record),
+                        depth,
+                        tuple(child.message_id for child in children.get(record.message_id, [])),
+                        record.message_id in active_ids,
+                        record.message_id == getattr(self.session_store, "current_leaf_id", None),
+                    )
+                )
+                visit(record.message_id, depth + 1)
+
+        visit(None, 0)
+        return nodes
+
+    @staticmethod
+    def _tree_node_role(record) -> str:
+        if record.record_type == "compaction":
+            return "compaction"
+        if record.record_type == "session_info":
+            return "session_info"
+        return record.message.role if record.message is not None else "unknown"
+
+    @staticmethod
+    def _tree_node_preview(record) -> str:
+        if record.record_type == "compaction":
+            summary = (record.metadata or {}).get("summary", "")
+            return str(summary).splitlines()[0] if summary else "summary checkpoint"
+        if record.record_type == "session_info":
+            return f"name={((record.metadata or {}).get('name') or '(unnamed)')}"
+        message = record.message
+        if message is None:
+            return ""
+        preview = message.content or ""
+        if message.role == "assistant" and message.tool_calls:
+            tools = ", ".join(call.name for call in message.tool_calls)
+            preview = f"tool: {tools}" if not preview else f"{preview} [tool: {tools}]"
+        elif message.role == "tool" and message.tool_result is not None:
+            preview = f"{message.tool_result.name}: {preview}"
+        preview = " ".join(preview.split())
+        return preview if len(preview) <= 96 else preview[:93] + "..."
+
+    def new_session(self) -> Path:
+        """Create and activate a new empty session without changing the Loop."""
+        path = default_session_path(self.execution_env.cwd)
+        store = JsonlSessionStore(path)
+        # Keep an empty session discoverable before its first prompt. Pi also
+        # separates session selection from the first message append.
+        path.touch(exist_ok=False)
+        self._replace_session(store)
+        return path
+
+    def resume_session(self, identifier: str) -> Path:
+        """Activate a persisted session selected by id, stem, or unique prefix."""
+        path = resolve_session_path(self.execution_env.cwd, identifier)
+        store = JsonlSessionStore(path)
+        self._replace_session(store)
+        return path
+
+    def drop_session(self, identifier: str) -> Path:
+        """Delete a non-active managed session by id, stem, or unique prefix."""
+        value = identifier.strip() if isinstance(identifier, str) else ""
+        if not value:
+            raise SessionError("A session id is required; the active session cannot be dropped")
+        target = resolve_session_path(self.execution_env.cwd, value)
+        if target.resolve() == self.session_path.resolve():
+            raise SessionError("Cannot drop the active session; use /new or /resume instead")
+        return delete_session_path(self.execution_env.cwd, target)
+
+    def _replace_session(self, store: SessionStore) -> None:
+        """Replace the active store and rebuild all session-derived state."""
+        self.session_store = store
+        active_snapshot = self._active_snapshot()
+        restored_messages = (
+            list(active_snapshot.messages)
+            if active_snapshot is not None
+            else self.session_store.read()
+        )
+        self.state = LoopState(messages=restored_messages)
+        self._persisted_message_count = len(restored_messages)
+        self._token_ledger.reset(restored_messages)
+        self.context_inspector.clear()
+        self._restore_compaction(active_snapshot)
 
     def context_snapshot(self) -> ContextSnapshot | None:
         """Return the latest exact provider request for read-only diagnostics."""
@@ -259,14 +429,7 @@ class Harness:
         if checkout is None:
             raise SessionError("Configured session store does not support branches")
         checkout(message_id)
-        active_snapshot = self._active_snapshot()
-        self.state.messages = list(active_snapshot.messages) if active_snapshot is not None else self.session_store.read()
-        self.state.turn_count = 0
-        self.state.stop_reason = None
-        self.state.recovery_failures = 0
-        self._persisted_message_count = len(self.state.messages)
-        self._token_ledger.reset(self.state.messages)
-        self._restore_compaction(active_snapshot)
+        self._reload_active_state()
 
     def resolve_message_id(self, value: str) -> str:
         resolver = getattr(self.session_store, "resolve_message_id", None)
@@ -279,8 +442,15 @@ class Harness:
         if rollback is None:
             raise SessionError("Configured session store does not support rollback")
         rollback(message_id)
+        self._reload_active_state()
+
+    def _reload_active_state(self) -> None:
         active_snapshot = self._active_snapshot()
-        self.state.messages = list(active_snapshot.messages) if active_snapshot is not None else self.session_store.read()
+        self.state.messages = (
+            list(active_snapshot.messages)
+            if active_snapshot is not None
+            else self.session_store.read()
+        )
         self.state.turn_count = 0
         self.state.stop_reason = None
         self.state.recovery_failures = 0

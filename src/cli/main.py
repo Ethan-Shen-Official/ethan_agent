@@ -3,21 +3,14 @@ from __future__ import annotations
 import argparse
 import sys
 
-from core.errors import ProviderError, SessionError
+from core.errors import ProviderError
 from core.loop import DEFAULT_MAX_TURNS
 from harness.app import Harness
 from harness.approval import PromptApprovalHandler
-from harness.inspection import format_context_snapshot
 from providers.openai_compatible import OpenAICompatibleProvider
 from runtime.permissions import PERMISSION_MODES
+from .commands import handle_repl_command, is_exit_command
 from .renderer import render
-
-
-PERMISSION_MODE_ALIASES = {
-    "d": "default",
-    "e": "accept_edits",
-    "b": "bypass_permissions",
-}
 
 
 def positive_int(value: str) -> int:
@@ -60,81 +53,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def handle_repl_command(command: str, harness: Harness) -> bool:
-    """Handle local session commands without entering the model loop."""
-    parts = command.strip().split()
-    if not parts or parts[0] not in {
-        "/checkout",
-        "/rollback",
-        "/show_context",
-        "/compact",
-        "/permission_mode",
-        "/perm",
-    }:
-        return False
-    name = parts[0]
-    if name in {"/permission_mode", "/perm"}:
-        usage = (
-            "usage: /perm [d|e|b] (d=default, e=accept_edits, b=bypass_permissions)"
-            if name == "/perm"
-            else "usage: /permission_mode [default|accept_edits|bypass_permissions]"
-        )
-        if len(parts) > 2:
-            print(usage)
-            return True
-        try:
-            if len(parts) == 1:
-                print(f"[permission_mode] {harness.permission_mode()}")
-            else:
-                mode = PERMISSION_MODE_ALIASES.get(parts[1], parts[1])
-                if mode not in PERMISSION_MODES:
-                    print(usage)
-                    return True
-                harness.set_permission_mode(mode)
-                print(f"[permission_mode] switched to {mode}")
-        except SessionError as exc:
-            print(f"[permission_mode error] {exc}", file=sys.stderr)
-        return True
-    if name == "/compact":
-        if len(parts) > 1:
-            print("usage: /compact")
-            return True
-        try:
-            result = harness.compact()
-            if result is None:
-                print("[compact] context is below the configured threshold")
-            else:
-                print(f"[compact] summarized {result.summarized_count} messages; kept {result.kept_count}")
-        except (ProviderError, SessionError) as exc:
-            print(f"[compact error] {exc}", file=sys.stderr)
-        return True
-    if name == "/show_context":
-        if len(parts) > 2 or (len(parts) == 2 and parts[1] not in {"--raw", "raw"}):
-            print("usage: /show_context [--raw]")
-            return True
-        snapshot = harness.context_snapshot()
-        if snapshot is None:
-            print("[show_context] no model request has been sent yet")
-            return True
-        print(format_context_snapshot(snapshot, redact=len(parts) == 1))
-        return True
-    if len(parts) > 2 or (name == "/checkout" and len(parts) != 2):
-        usage = f"usage: {name} <message-id>" if name == "/checkout" else "usage: /rollback [message-id]"
-        print(usage)
-        return True
-    try:
-        message_id = harness.resolve_message_id(parts[1]) if len(parts) == 2 else None
-        if name == "/checkout":
-            harness.checkout(message_id)
-        else:
-            harness.rollback(message_id)
-        current = getattr(harness.session_store, "current_leaf_id", None)
-        print(f"[{name[1:]}] active message: {current or 'root'}")
-    except SessionError as exc:
-        print(f"[{name[1:]} error] {exc}", file=sys.stderr)
-    return True
-
-
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -161,10 +79,10 @@ def main(argv: list[str] | None = None) -> int:
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
-        if prompt.strip() in {"", "/exit", "/quit"}:
-            if prompt.strip():
-                return 0
+        if prompt.strip() == "":
             continue
+        if is_exit_command(prompt):
+            return 0
         if handle_repl_command(prompt, harness):
             continue
         for event in harness.prompt(prompt):

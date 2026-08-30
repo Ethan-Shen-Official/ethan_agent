@@ -21,9 +21,10 @@ def _record(*, message=None, record_type="message", metadata=None):
 
 
 def test_record_type_is_a_closed_runtime_discriminator():
-    assert get_args(RecordType) == ("message", "compaction")
+    assert get_args(RecordType) == ("message", "compaction", "session_info")
     assert _record(message=Message.user("hello")).record_type == "message"
     assert _record(record_type="compaction", metadata={"summary": "done"}).message is None
+    assert _record(record_type="session_info", metadata={"name": "demo"}).message is None
 
 
 @pytest.mark.parametrize(

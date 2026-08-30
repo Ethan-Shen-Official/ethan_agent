@@ -20,7 +20,12 @@ from runtime.compact import (
     summary_message,
     summarize_with_provider,
 )
-from runtime.permissions import AllowAllPermissions
+from runtime.permissions import (
+    ApprovalHandler,
+    PermissionManager,
+    PermissionMode,
+    WorkspacePermissionPolicy,
+)
 from runtime.session import JsonlSessionStore, SessionStore, default_session_path, latest_session_path
 from tools.base import ToolContext
 from tools.executor import ToolExecutor, ToolOutputLimits
@@ -43,6 +48,9 @@ class Harness:
         session_store: SessionStore | None = None,
         tool_output_limits: ToolOutputLimits | None = None,
         compact_config: CompactConfig | None = None,
+        permission_mode: PermissionMode = "default",
+        permission_manager: PermissionManager | None = None,
+        approval_handler: ApprovalHandler | None = None,
     ) -> None:
         self.execution_env = LocalExecutionEnv(cwd)
         self.provider = provider
@@ -73,8 +81,26 @@ class Harness:
                 ShellTool(),
             ]
         )
-        context = ToolContext(self.execution_env, AllowAllPermissions())
-        self.hooks = hooks or ToolLoopHooks()
+        policy = permission_manager or WorkspacePermissionPolicy(permission_mode)
+        # Tool implementations do not make permission decisions. Keep the
+        # legacy context field for embedders while the Hook pipeline owns the
+        # single pre-execution permission check.
+        context = ToolContext(self.execution_env)
+        configured_hooks = hooks or ToolLoopHooks()
+        if configured_hooks.permission_manager is None:
+            configured_hooks = ToolLoopHooks(
+                before_tool=configured_hooks.before_tool,
+                after_tool=configured_hooks.after_tool,
+                permission_manager=policy,
+                approval_handler=approval_handler,
+            )
+        self.hooks = configured_hooks
+        active_permission_manager = self.hooks.permission_manager
+        self.permission_policy = (
+            active_permission_manager
+            if isinstance(active_permission_manager, WorkspacePermissionPolicy)
+            else None
+        )
         self.tool_executor = ToolExecutor(
             self.registry,
             context,
@@ -96,6 +122,21 @@ class Harness:
             LoopConfig(max_turns=max_turns),
             self.context_builder,
         )
+
+    def permission_mode(self) -> PermissionMode:
+        """Return the active workspace policy mode for CLI diagnostics."""
+        if self.permission_policy is None:
+            raise SessionError("configured permission manager does not expose a mutable mode")
+        return self.permission_policy.mode
+
+    def set_permission_mode(self, mode: PermissionMode) -> None:
+        """Change permission behavior for subsequent tool calls."""
+        if self.permission_policy is None:
+            raise SessionError("configured permission manager does not expose a mutable mode")
+        try:
+            self.permission_policy.set_mode(mode)
+        except ValueError as exc:
+            raise SessionError(str(exc)) from exc
 
     def context_snapshot(self) -> ContextSnapshot | None:
         """Return the latest exact provider request for read-only diagnostics."""

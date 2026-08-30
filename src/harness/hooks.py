@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from core.hooks import ToolHookContext, ToolHookDecision
+from runtime.permissions import ApprovalHandler, PermissionManager, PermissionRequest
 
 
 BeforeToolHook = Callable[[ToolHookContext], ToolHookDecision | None]
@@ -14,10 +15,17 @@ AfterToolHook = Callable[[ToolHookContext], ToolHookDecision | None]
 
 @dataclass(frozen=True)
 class ToolLoopHooks:
-    """Optional before/after callbacks with one shared typed contract."""
+    """One preflight pipeline for custom hooks and permission policy.
+
+    Permission is evaluated here instead of as a second executor-level gate.
+    A custom hook may block or replace arguments, but a replacement is still
+    evaluated by the policy before execution is allowed.
+    """
 
     before_tool: BeforeToolHook | None = None
     after_tool: AfterToolHook | None = None
+    permission_manager: PermissionManager | None = None
+    approval_handler: ApprovalHandler | None = None
 
     @staticmethod
     def _invoke(callback, context: ToolHookContext) -> ToolHookDecision:
@@ -40,7 +48,56 @@ class ToolLoopHooks:
             raise ValueError("replace_arguments requires an object")
         if decision.result is not None:
             raise ValueError("before_tool cannot replace a result")
-        return decision
+        if decision.action == "block":
+            return decision
+
+        effective_call = context.call
+        if decision.action == "replace_arguments":
+            effective_call = type(context.call)(
+                context.call.id,
+                context.call.name,
+                decision.arguments,
+            )
+            policy_context = replace(context, call=effective_call)
+        else:
+            policy_context = context
+
+        permission = self._permission_decision(policy_context)
+        if permission.action == "block":
+            return permission
+        if decision.action == "replace_arguments":
+            return decision
+        return permission
+
+    def _permission_decision(self, context: ToolHookContext) -> ToolHookDecision:
+        if self.permission_manager is None:
+            return ToolHookDecision()
+        decision = self.permission_manager.check(
+            context.call.name,
+            context.call.arguments,
+        )
+        if decision.behavior == "allow":
+            return ToolHookDecision()
+        if decision.behavior == "deny":
+            return ToolHookDecision(
+                action="block",
+                reason=decision.reason or "permission denied",
+            )
+        if self.approval_handler is None:
+            return ToolHookDecision(
+                action="block",
+                reason=decision.reason or "permission requires approval",
+            )
+        approved = self.approval_handler(
+            PermissionRequest(
+                context.call.name,
+                dict(context.call.arguments),
+                decision.reason,
+            )
+        )
+        if approved:
+            return ToolHookDecision()
+        return ToolHookDecision(action="block", reason="permission denied by user")
 
     def after(self, context: ToolHookContext) -> ToolHookDecision:
         if context.phase != "after_tool":

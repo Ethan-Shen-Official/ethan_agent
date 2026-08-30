@@ -32,6 +32,9 @@ REPL 中的会话命令：
 - `/show_context`：显示最近一次实际发送给模型的完整上下文快照，敏感值默认脱敏。
 - `/show_context --raw`：在本地调试时显示未脱敏快照。
 - `/compact`：立即压缩当前会话的旧消息，并将摘要写入 Session Tree。
+- `/permission_mode`：显示当前权限模式。
+- `/permission_mode <mode>`：切换后续工具调用的权限模式，可选 `default`、`accept_edits` 或 `bypass_permissions`。
+- `/perm [d|e|b]`：权限模式简写；`d=default`、`e=accept_edits`、`b=bypass_permissions`。
 
 这些命令只回滚消息上下文，不撤销工具已经产生的文件或 Shell 副作用。Compact 同样不会删除原始 Session 记录。
 
@@ -71,7 +74,7 @@ Loop 按以下五个阶段运行：
 - search：按 glob 搜索工作区路径。
 - exe：在固定工作目录执行 Shell 命令。
 
-路径校验和工作区边界由 ExecutionEnv 负责。当前权限实现仍为 AllowAllPermissions，真实询问式权限和 OS 级沙箱是后续扩展。
+权限策略由 Harness 装配到 before_tool 预执行链：默认允许读取，写入、编辑和 Shell 命令需要确认；`--permission-mode` 可选择 `default`、`accept_edits` 或 `bypass_permissions`。路径校验和工作区边界仍由 ExecutionEnv 负责，不能被权限模式绕过；包含 `.agent` 或 `.git` 元数据路径的文件操作和 Shell 命令始终被拒绝。递归删除工作区根目录、全量通配符删除、`find . -delete` 和 `git clean -f` 等命令属于不可逆操作，在所有模式下直接拒绝。
 
 ## 工具输出截断
 

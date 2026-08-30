@@ -72,20 +72,6 @@ class ToolExecutor:
             if call is not original_call:
                 self._validate_arguments(tool.spec.input_schema, call.arguments)
 
-            decision = self.context.permission_manager.check(call.name, call.arguments)
-            if decision != "allow":
-                return (
-                    self._error_result(
-                        call,
-                        ToolError(
-                            f"permission {decision}",
-                            code="permission_denied",
-                            retryable=False,
-                        ),
-                    ),
-                    False,
-                )
-
             started = perf_counter()
             result = tool.execute({**call.arguments, "_call_id": call.id}, self.context)
             elapsed_ms = int((perf_counter() - started) * 1000)
@@ -115,7 +101,11 @@ class ToolExecutor:
                 raise ValueError("before_tool allow cannot contain result or terminate")
             return call
         if decision.action == "block":
-            raise PermissionError(decision.reason or "blocked by before_tool hook")
+            raise ToolError(
+                decision.reason or "blocked by before_tool hook",
+                code="permission_denied",
+                retryable=False,
+            )
         if decision.action == "replace_arguments":
             if not isinstance(decision.arguments, dict):
                 raise ValueError("replace_arguments requires an object")

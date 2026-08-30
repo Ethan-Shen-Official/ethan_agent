@@ -234,7 +234,12 @@ def test_after_tool_can_transform_result_and_stop_loop(tmp_path: Path):
             terminate=True,
         )
     )
-    harness = Harness(FakeProvider([[call], "must not run"]), str(tmp_path), hooks=hooks)
+    harness = Harness(
+        FakeProvider([[call], "must not run"]),
+        str(tmp_path),
+        hooks=hooks,
+        permission_mode="accept_edits",
+    )
     events = list(harness.prompt("write a note"))
     result = next(event.data["result"] for event in events if event.kind == "tool_result")
     assert result.content == "redacted"

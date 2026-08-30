@@ -10,8 +10,15 @@ from core.types import ToolResult, ToolSpec
 
 @dataclass(frozen=True)
 class ToolContext:
+    """Execution dependencies supplied by the harness.
+
+    ``permission_manager`` is retained as an optional compatibility field for
+    low-level embedders. Permission decisions are made by ``ToolLoopHooks``
+    before a tool runs; built-in tools must not call this field themselves.
+    """
+
     execution_env: Any
-    permission_manager: Any
+    permission_manager: Any = None
 
 
 class Tool(Protocol):
@@ -26,9 +33,9 @@ class Tool(Protocol):
 class ToolBase(ABC):
     """Common boundary for built-in tools and future local adapters.
 
-    The executor owns lookup, schema validation and permissions. This class
-    owns call-id extraction and conversion of implementation failures into a
-    ToolResult for direct tool callers.
+    The executor owns lookup and schema validation. Permission policy is
+    composed into the harness before-tool pipeline. This class owns call-id
+    extraction and conversion of implementation failures into a ToolResult.
     """
 
     spec: ToolSpec

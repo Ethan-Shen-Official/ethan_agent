@@ -6,9 +6,18 @@ import sys
 from core.errors import ProviderError, SessionError
 from core.loop import DEFAULT_MAX_TURNS
 from harness.app import Harness
+from harness.approval import PromptApprovalHandler
 from harness.inspection import format_context_snapshot
 from providers.openai_compatible import OpenAICompatibleProvider
+from runtime.permissions import PERMISSION_MODES
 from .renderer import render
+
+
+PERMISSION_MODE_ALIASES = {
+    "d": "default",
+    "e": "accept_edits",
+    "b": "bypass_permissions",
+}
 
 
 def positive_int(value: str) -> int:
@@ -42,15 +51,50 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_TURNS,
         help=f"maximum agent turns per prompt (default: {DEFAULT_MAX_TURNS})",
     )
+    parser.add_argument(
+        "--permission-mode",
+        choices=PERMISSION_MODES,
+        default="default",
+        help="tool permission mode (default: default)",
+    )
     return parser
 
 
 def handle_repl_command(command: str, harness: Harness) -> bool:
     """Handle local session commands without entering the model loop."""
     parts = command.strip().split()
-    if not parts or parts[0] not in {"/checkout", "/rollback", "/show_context", "/compact"}:
+    if not parts or parts[0] not in {
+        "/checkout",
+        "/rollback",
+        "/show_context",
+        "/compact",
+        "/permission_mode",
+        "/perm",
+    }:
         return False
     name = parts[0]
+    if name in {"/permission_mode", "/perm"}:
+        usage = (
+            "usage: /perm [d|e|b] (d=default, e=accept_edits, b=bypass_permissions)"
+            if name == "/perm"
+            else "usage: /permission_mode [default|accept_edits|bypass_permissions]"
+        )
+        if len(parts) > 2:
+            print(usage)
+            return True
+        try:
+            if len(parts) == 1:
+                print(f"[permission_mode] {harness.permission_mode()}")
+            else:
+                mode = PERMISSION_MODE_ALIASES.get(parts[1], parts[1])
+                if mode not in PERMISSION_MODES:
+                    print(usage)
+                    return True
+                harness.set_permission_mode(mode)
+                print(f"[permission_mode] switched to {mode}")
+        except SessionError as exc:
+            print(f"[permission_mode error] {exc}", file=sys.stderr)
+        return True
     if name == "/compact":
         if len(parts) > 1:
             print("usage: /compact")
@@ -104,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
         max_turns=args.max_turns,
         session_path=args.session_file,
         resume=args.continue_session,
+        permission_mode=args.permission_mode,
+        approval_handler=PromptApprovalHandler(),
     )
     if args.prompt:
         for event in harness.prompt(args.prompt):

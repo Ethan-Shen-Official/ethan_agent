@@ -10,8 +10,8 @@ from harness.approval import PromptApprovalHandler
 from providers.openai_compatible import OpenAICompatibleProvider
 from runtime.permissions import PERMISSION_MODES
 from .commands import handle_repl_command, is_exit_command
-from .repl import ApprovalBroker, create_approval_handler, run_tui
-from .tui import TuiRenderer
+from .repl import ApprovalBroker, create_approval_handler, run_repl
+from .renderer import render
 
 
 def positive_int(value: str) -> int:
@@ -76,12 +76,10 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     if args.prompt:
-        ui = TuiRenderer(interactive=False)
         for event in harness.prompt(args.prompt):
-            ui.render_event(event)
-        ui.close()
+            render(event)
         return 0
-    return run_tui(harness, approval_broker)
+    return run_repl(harness, approval_broker)
 
 
 if __name__ == "__main__":

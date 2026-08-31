@@ -14,7 +14,7 @@ Python coding agent。核心 Loop 负责模型请求、工具调用和停止条�
 
     python -m cli.main --cwd . "在工作目录创建 demo.txt 并写入 Hello World"
 
-交互式 TUI：
+REPL：
 
     python -m cli.main --cwd .
 
@@ -125,5 +125,5 @@ Harness 启动时从 JsonlSessionStore 恢复当前活动分支；运行过程�
 - src/runtime：ExecutionEnv、权限和运行时策略；`runtime/session/` 内按 `types.py`（契约）、`paths.py`（路径）、`codec.py`（编解码）、`tree.py`（分支树）和 `store.py`（JSONL 存储）拆分，`runtime.session` 保留兼容导出。
 - src/harness：长生命周期入口和工具 Hook 装配。
 - src/providers：模型协议适配。
-- src/cli：命令行入口、TUI 生命周期和事件渲染。交互模式使用状态化终端渲染；工具调用只在运行期间显示，收到结果后从临时区域清除。
+- src/cli：命令行入口和事件渲染。
 - docs/architecture-plan.md：整体架构计划。

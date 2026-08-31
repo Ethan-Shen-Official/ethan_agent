@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from harness.approval import PromptApprovalHandler
 from .commands import handle_repl_command, is_exit_command, resolve_command
-from .tui import TuiRenderer
+from .renderer import render
 
 if TYPE_CHECKING:
     from harness.app import Harness
@@ -60,18 +60,16 @@ def create_approval_handler(broker: ApprovalBroker) -> PromptApprovalHandler:
     return PromptApprovalHandler(broker.ask)
 
 
-def run_tui(harness: "Harness", approval_broker: ApprovalBroker | None = None) -> int:
-    """Run the interactive TUI while at most one prompt worker is active."""
+def run_repl(harness: "Harness", approval_broker: ApprovalBroker | None = None) -> int:
+    """Run a responsive REPL while at most one prompt worker is active."""
     broker = approval_broker or ApprovalBroker()
     commands: Queue[str | None] = Queue()
     events: Queue[tuple[str, object]] = Queue()
-    ui = TuiRenderer()
-    ui.start(cwd=str(harness.execution_env.cwd), session_id=harness.session_id)
 
     def read_commands() -> None:
         while True:
             try:
-                value = ui.read_prompt()
+                value = input("agent> ")
             except (EOFError, KeyboardInterrupt):
                 commands.put(None)
                 return
@@ -102,9 +100,9 @@ def run_tui(harness: "Harness", approval_broker: ApprovalBroker | None = None) -
             except Empty:
                 return
             if kind == "event":
-                ui.render_event(value)
+                render(value)
             elif kind == "error":
-                ui.render_system(f"[error] {value}")
+                print(f"\n[error] {value}")
 
     def stop_worker() -> None:
         # Release a possible permission prompt before waiting for the task.
@@ -143,9 +141,9 @@ def run_tui(harness: "Harness", approval_broker: ApprovalBroker | None = None) -
                     handle_repl_command(command, harness)
                 elif broker.pending:
                     if not broker.submit(command):
-                        ui.render_system("[busy] agent is still running; use /abort")
+                        print("[busy] agent is still running; use /abort")
                 else:
-                    ui.render_system("[busy] agent is still running; use /abort")
+                    print("[busy] agent is still running; use /abort")
                 continue
 
             if handle_repl_command(command, harness):
@@ -153,11 +151,6 @@ def run_tui(harness: "Harness", approval_broker: ApprovalBroker | None = None) -
             worker = start_prompt(command)
     finally:
         broker.cancel()
-        ui.close()
 
 
-# Compatibility name retained for callers that imported the pre-TUI REPL.
-run_repl = run_tui
-
-
-__all__ = ["ApprovalBroker", "create_approval_handler", "run_repl", "run_tui"]
+__all__ = ["ApprovalBroker", "create_approval_handler", "run_repl"]

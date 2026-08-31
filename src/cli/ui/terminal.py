@@ -224,7 +224,10 @@ class TerminalBackend:
             if str(encoding).lower().replace("-", "") not in {"utf8", "utf8sig"}:
                 text = text.translate(str.maketrans({
                     "›": ">", "●": "*", "◌": "o", "×": "x", "▌": "|",
-                    "•": "*", "│": "|", "↑": "^", "↓": "v", "·": ".", "…": "...",
+                    "•": "*", "│": "|", "├": "+", "└": "+", "⊟": "-",
+                    "↑": "^", "↓": "v", "·": ".", "…": "...",
+                    "⠋": "|", "⠙": "/", "⠹": "-", "⠸": "\\", "⠼": "|",
+                    "⠴": "/", "⠦": "-", "⠧": "\\", "⠇": "|", "⠏": "/",
                 }))
             text = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
         self.stdout.write(text)

@@ -122,20 +122,17 @@ def find_valid_cut_points(messages: list[Message]) -> list[int]:
 def find_cut_point(messages: list[Message], keep_recent_tokens: int) -> int | None:
     """Find a valid retained-region start in one reverse scan.
 
-    The scan preserves the previous behavior: tool results are never a cut
-    point, and if the budget is smaller than the whole list the oldest valid
-    point is used as a conservative fallback.
+    Tool results are never a cut point. If the transcript cannot accumulate
+    the requested recent-message budget, return ``None`` instead of silently
+    compacting up to the first available node.
     """
     accumulated = 0
     first_valid: int | None = None
-    rightmost_valid: int | None = None
     selected: int | None = None
     threshold_index: int | None = None
     for index in range(len(messages) - 1, -1, -1):
         is_valid = index > 0 and messages[index].role in {"user", "assistant"}
         if is_valid:
-            if rightmost_valid is None:
-                rightmost_valid = index
             first_valid = index
         accumulated += estimate_tokens(messages[index])
         if threshold_index is None and accumulated >= keep_recent_tokens:
@@ -144,11 +141,12 @@ def find_cut_point(messages: list[Message], keep_recent_tokens: int) -> int | No
         elif threshold_index is not None and index < threshold_index:
             if selected is not None:
                 return selected
-            if rightmost_valid is not None:
-                return rightmost_valid
     if threshold_index is None:
-        return first_valid
-    return selected if selected is not None else rightmost_valid
+        return None
+    # If the threshold landed on a tool result, use the next older valid
+    # message boundary so the retained region stays protocol-complete. This
+    # is only reached after the requested recent budget was actually met.
+    return selected if selected is not None else first_valid
 
 
 def file_operations(messages: Iterable[Message]) -> dict[str, list[str]]:

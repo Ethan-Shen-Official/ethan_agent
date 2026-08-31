@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import shutil
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TextIO
 
 from core.errors import ProviderError, SessionError
 from harness.inspection import format_context_snapshot
@@ -42,7 +42,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("/new", ("/n",), "/new", "Create and activate a new empty session."),
     CommandSpec("/name", ("/nm",), "/name [name]", "Show, set, or clear the current session display name."),
     CommandSpec("/resume", ("/res",), "/resume [session-id]", "List sessions or switch by id, filename, or unique prefix."),
-    CommandSpec("/drop", (), "/drop <session-id>", "Permanently delete a selected non-active session."),
+    CommandSpec("/drop", (), "/drop [session-id]", "Select or permanently delete a non-active session."),
     CommandSpec("/tree", ("/t",), "/tree", "Show the current session tree and active path."),
     CommandSpec("/checkout", ("/co",), "/checkout <message-id>", "Switch to a message branch in the active session."),
     CommandSpec("/rollback", ("/rb",), "/rollback [message-id]", "Move the active branch to a previous boundary."),
@@ -88,8 +88,9 @@ def is_exit_command(command: str) -> bool:
     return len(parts) == 1 and spec is not None and spec.name == "/exit"
 
 
-def handle_repl_command(command: str, harness: "Harness") -> bool:
+def handle_repl_command(command: str, harness: "Harness", *, output: TextIO | None = None) -> bool:
     """Handle a registered command without entering the model loop."""
+    out = output or sys.stdout
     parts = command.strip().split()
     if not parts:
         return False
@@ -98,153 +99,153 @@ def handle_repl_command(command: str, harness: "Harness") -> bool:
         return False
     if spec.name == "/exit":
         if len(parts) != 1:
-            print("usage: /exit")
+            print("usage: /exit", file=out)
             return True
         return False
     name = spec.name
 
     if name == "/abort":
         if len(parts) != 1:
-            print("usage: /abort")
+            print("usage: /abort", file=out)
         elif not harness.is_running:
-            print("[abort] no active task")
+            print("[abort] no active task", file=out)
         else:
             harness.abort()
-            print("[abort] requested")
+            print("[abort] requested", file=out)
         return True
 
     if name == "/help":
         if len(parts) > 2:
-            print("usage: /help [command]")
+            print("usage: /help [command]", file=out)
         else:
-            print(format_help(parts[1] if len(parts) == 2 else None))
+            print(format_help(parts[1] if len(parts) == 2 else None), file=out)
         return True
 
     if name == "/new":
         if len(parts) != 1:
-            print("usage: /new")
+            print("usage: /new", file=out)
             return True
         try:
             path = harness.new_session()
-            print(f"[new] session: {harness.session_id} ({path.name})")
+            print(f"[new] session: {harness.session_id} ({path.name})", file=out)
         except SessionError as exc:
-            print(f"[new error] {exc}")
+            print(f"[new error] {exc}", file=out)
         return True
 
     if name == "/name":
         raw_name = command.strip().split(maxsplit=1)[1] if len(parts) > 1 else None
         if raw_name is None:
-            print(f"[name] {harness.session_name or '(unnamed)'}")
+            print(f"[name] {harness.session_name or '(unnamed)'}", file=out)
             return True
         value = "" if raw_name.strip() == "-" else raw_name.strip()
         if len(value) > 120:
-            print("[name error] name must be at most 120 characters")
+            print("[name error] name must be at most 120 characters", file=out)
             return True
         try:
             harness.set_session_name(value)
-            print(f"[name] {harness.session_name or '(unnamed)'}")
+            print(f"[name] {harness.session_name or '(unnamed)'}", file=out)
         except SessionError as exc:
-            print(f"[name error] {exc}")
+            print(f"[name error] {exc}", file=out)
         return True
 
     if name == "/resume":
         if len(parts) > 2:
-            print("usage: /resume [session-id]")
+            print("usage: /resume [session-id]", file=out)
             return True
         try:
-            identifier = parts[1] if len(parts) == 2 else _choose_session(harness)
+            identifier = parts[1] if len(parts) == 2 else _choose_session(harness, output=out)
             if identifier is None:
                 return True
             path = harness.resume_session(identifier)
             label = harness.session_name or "(unnamed)"
-            print(f"[resume] {label} - {harness.session_id} ({path.name})")
+            print(f"[resume] {label} - {harness.session_id} ({path.name})", file=out)
         except SessionError as exc:
-            print(f"[resume error] {exc}")
+            print(f"[resume error] {exc}", file=out)
         return True
 
     if name == "/drop":
         if len(parts) != 2:
-            print("usage: /drop <session-id>")
+            print("usage: /drop <session-id>", file=out)
             return True
         identifier = parts[1]
         label = identifier
-        if not _confirm_drop(label):
-            print("[drop] cancelled")
+        if not _confirm_drop(label, output=out):
+            print("[drop] cancelled", file=out)
             return True
         try:
             deleted = harness.drop_session(identifier)
-            print(f"[drop] deleted: {deleted.name}")
+            print(f"[drop] deleted: {deleted.name}", file=out)
         except SessionError as exc:
-            print(f"[drop error] {exc}")
+            print(f"[drop error] {exc}", file=out)
         return True
 
     if name == "/tree":
         if len(parts) != 1:
-            print("usage: /tree")
+            print("usage: /tree", file=out)
             return True
         try:
             nodes = harness.session_tree()
             if not nodes:
-                print("[tree] session is empty")
+                print("[tree] session is empty", file=out)
                 return True
-            print(f"[tree] {harness.session_name or '(unnamed)'}")
-            print("     * active leaf, + active path")
-            print(*format_tree(nodes), sep="\n")
+            print(f"[tree] {harness.session_name or '(unnamed)'}", file=out)
+            print("     * active leaf, + active path", file=out)
+            print(*format_tree(nodes), sep="\n", file=out)
         except SessionError as exc:
-            print(f"[tree error] {exc}")
+            print(f"[tree error] {exc}", file=out)
         return True
 
     if name == "/permission_mode":
         usage = "usage: /permission_mode [default|accept_edits|bypass_permissions]"
         if len(parts) > 2:
-            print(usage)
+            print(usage, file=out)
             return True
         try:
             if len(parts) == 1:
-                print(f"[permission_mode] {harness.permission_mode()}")
+                print(f"[permission_mode] {harness.permission_mode()}", file=out)
             else:
                 mode = PERMISSION_MODE_ALIASES.get(parts[1], parts[1])
                 if mode not in PERMISSION_MODES:
-                    print(usage)
+                    print(usage, file=out)
                     return True
                 harness.set_permission_mode(mode)
-                print(f"[permission_mode] switched to {mode}")
+                print(f"[permission_mode] switched to {mode}", file=out)
         except SessionError as exc:
-            print(f"[permission_mode error] {exc}")
+            print(f"[permission_mode error] {exc}", file=out)
         return True
 
     if name == "/compact":
         if len(parts) > 1:
-            print("usage: /compact")
+            print("usage: /compact", file=out)
             return True
         try:
             result = harness.compact()
             if result is None:
-                print("[compact] context is below the configured threshold")
+                print("[compact] context is below the configured threshold", file=out)
             else:
-                print(f"[compact] summarized {result.summarized_count} messages; kept {result.kept_count}")
+                print(f"[compact] summarized {result.summarized_count} messages; kept {result.kept_count}", file=out)
         except (ProviderError, SessionError) as exc:
-            print(f"[compact error] {exc}")
+            print(f"Error: Compaction failed: {exc}", file=out)
         return True
 
     if name == "/show_context":
         if len(parts) > 2 or (len(parts) == 2 and parts[1] not in {"--raw", "raw"}):
-            print("usage: /show_context [--raw]")
+            print("usage: /show_context [--raw]", file=out)
             return True
         snapshot = harness.context_snapshot()
         if snapshot is None:
-            print("[show_context] no model request has been sent yet")
+            print("[show_context] no model request has been sent yet", file=out)
             return True
-        print(format_context_snapshot(snapshot, redact=len(parts) == 1))
+        print(format_context_snapshot(snapshot, redact=len(parts) == 1), file=out)
         return True
 
     if name == "/checkout":
         if len(parts) != 2:
-            print("usage: /checkout <message-id>")
+            print("usage: /checkout <message-id>", file=out)
             return True
     elif name == "/rollback":
         if len(parts) > 2:
-            print("usage: /rollback [message-id]")
+            print("usage: /rollback [message-id]", file=out)
             return True
 
     try:
@@ -254,9 +255,9 @@ def handle_repl_command(command: str, harness: "Harness") -> bool:
         else:
             harness.rollback(message_id)
         current = getattr(harness.session_store, "current_leaf_id", None)
-        print(f"[{name[1:]}] active message: {current or 'root'}")
+        print(f"[{name[1:]}] active message: {current or 'root'}", file=out)
     except SessionError as exc:
-        print(f"[{name[1:]} error] {exc}")
+        print(f"[{name[1:]} error] {exc}", file=out)
     return True
 
 
@@ -287,24 +288,25 @@ def _terminal_safe(value: str) -> str:
     return value.encode(encoding, errors="replace").decode(encoding, errors="replace")
 
 
-def _choose_session(harness: "Harness") -> str | None:
+def _choose_session(harness: "Harness", *, output: TextIO | None = None) -> str | None:
     """Display a textual selector and return the chosen session identifier."""
     catalog = harness.session_catalog()
+    out = output or sys.stdout
     if not catalog:
-        print("[resume] no persisted sessions")
+        print("[resume] no persisted sessions", file=out)
         return None
-    print("Available sessions:")
+    print("Available sessions:", file=out)
     for index, entry in enumerate(catalog, 1):
         name = entry["name"] or "(unnamed)"
         prompt = str(entry["first_prompt"] or "").replace("\n", " ").strip()
         if len(prompt) > 56:
             prompt = prompt[:53] + "..."
         modified = datetime.fromtimestamp(float(entry["modified"])).strftime("%Y-%m-%d %H:%M")
-        print(f"  {index}. {name}  [{str(entry['id'])[:12]}]  {modified}  {prompt}")
+        print(f"  {index}. {name}  [{str(entry['id'])[:12]}]  {modified}  {prompt}", file=out)
     try:
         selected = input("select session (number or id, blank cancels)> ").strip()
     except (EOFError, KeyboardInterrupt):
-        print()
+        print(file=out)
         return None
     if not selected:
         return None
@@ -312,17 +314,17 @@ def _choose_session(harness: "Harness") -> str | None:
         index = int(selected)
         if 1 <= index <= len(catalog):
             return str(catalog[index - 1]["id"])
-        print("[resume] invalid session number")
+        print("[resume] invalid session number", file=out)
         return None
     return selected
 
 
-def _confirm_drop(label: str) -> bool:
+def _confirm_drop(label: str, *, output: TextIO | None = None) -> bool:
     """Require an explicit confirmation before deleting persisted history."""
     try:
         answer = input(f"Permanently delete session '{label}'? [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
-        print()
+        print(file=output or sys.stdout)
         return False
     return answer in {"y", "yes"}
 

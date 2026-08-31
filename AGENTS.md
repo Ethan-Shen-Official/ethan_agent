@@ -27,7 +27,10 @@ TUI -> Harness -> Agent Loop
 ```text
 src/
 ├── main.py
-├── cli/{main.py,renderer.py}
+├── cli/
+│   ├── {main.py,commands.py,repl.py}
+│   ├── ui/{app.py,renderer.py,components.py,state.py,reducer.py,input.py,terminal.py,markdown.py,overlay.py}
+│   └── views/{session.py,tree.py}
 ├── core/{types.py,events.py,state.py,loop.py,context.py,errors.py}
 ├── providers/{base.py,openai_compatible.py}
 ├── tools/{base.py,registry.py,executor.py,filesystem.py,shell.py}

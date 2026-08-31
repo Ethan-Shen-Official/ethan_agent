@@ -115,6 +115,8 @@ class ScreenRenderer:
     def _lines(self, state: UiState, *, apply_selection: bool = True) -> tuple[list[str], tuple[int, int]]:
         width = max(20, int(getattr(self.terminal, "columns", state.terminal_width)))
         height = max(8, int(getattr(self.terminal, "rows", state.terminal_height)))
+        state.terminal_width = width
+        state.terminal_height = height
         content = self.transcript_component.render(state, width)
 
         footer = self.footer_component.render(state, width)
@@ -204,7 +206,8 @@ class ScreenRenderer:
         return self.footer_component.render(state, width)
 
     def _editor_lines_impl(self, state: UiState, width: int) -> tuple[list[str], tuple[int, int]]:
-        prompt = " select> " if state.overlay_kind == "resume" else " confirm> " if state.overlay_kind == "drop" else " agent> "
+        selecting = state.overlay_kind == "resume" or (state.overlay_kind == "drop" and not state.overlay_value)
+        prompt = " select> " if selecting else " confirm> " if state.overlay_kind == "drop" else " agent> "
         prompt_width = self._display_width(prompt)
         available = max(1, width - prompt_width)
         raw_lines = state.input_text.split("\n") or [""]

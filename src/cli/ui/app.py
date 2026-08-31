@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stdout
-from datetime import datetime
 from io import StringIO
 from queue import Empty, Queue
 import threading
 import time
 from typing import TYPE_CHECKING
 
-from .commands import handle_repl_command, is_exit_command, resolve_command
+from ..commands import handle_repl_command, is_exit_command, resolve_command
 from .input import InputEditor
+from .overlay import OverlayController
 from .reducer import reduce_event
 from .renderer import ScreenRenderer
 from .state import TranscriptItem, UiState
@@ -19,7 +18,7 @@ from .terminal import TerminalBackend
 
 if TYPE_CHECKING:
     from harness.app import Harness
-    from .repl import ApprovalBroker
+    from ..repl import ApprovalBroker
 
 
 class TuiApplication:
@@ -31,9 +30,14 @@ class TuiApplication:
         self.terminal = TerminalBackend()
         self.renderer = ScreenRenderer(self.terminal)
         self.editor = InputEditor()
+        self.overlay = OverlayController(self)
         self._paste_mode = False
         self.events: Queue[tuple[str, object]] = Queue()
         self.worker: threading.Thread | None = None
+        # Slash commands that can call the provider (currently /compact) run
+        # on the same worker channel as prompts so the input loop stays live.
+        self._command_running = False
+        self._command_cancel = threading.Event()
         self.state = UiState(
             cwd=str(harness.execution_env.cwd),
             session_id=harness.session_id,
@@ -91,7 +95,9 @@ class TuiApplication:
         self.state.selection_focus = None
         self.state.overlay_kind = None
         self.state.overlay_items = []
+        self.state.overlay_roles = []
         self.state.overlay_ids = []
+        self.state.overlay_scroll = 0
         self.state.overlay_value = ""
 
     @staticmethod
@@ -104,7 +110,7 @@ class TuiApplication:
         if not self.terminal.is_tty:
             # Piped stdin has no meaningful cursor/input redraw semantics.
             # Preserve the old line-mode behavior for scripts and tests.
-            from .repl import run_repl
+            from ..repl import run_repl
 
             return run_repl(self.harness, self.broker)
 
@@ -117,12 +123,19 @@ class TuiApplication:
                 key = self.terminal.read_key()
                 if key is not None:
                     self._handle_key(key)
-                if self.worker is not None and not self.worker.is_alive() and not self.harness.is_running:
+                # Animate from the main thread; worker threads only enqueue
+                # events and never write directly to the terminal.
+                if self._is_busy() or self.state.status == "compacting":
+                    self.state.spinner_frame = (self.state.spinner_frame + 1) % 10
+                    self._draw()
+                if self.worker is not None and not self.worker.is_alive() and not self.harness.is_running and not self._command_running:
                     self.worker = None
         finally:
             self.broker.cancel()
             if self.harness.is_running:
                 self.harness.abort()
+            if self._command_running:
+                self._abort_background_command()
             if self.worker is not None:
                 self.worker.join(timeout=1)
             self.terminal.stop()
@@ -143,6 +156,7 @@ class TuiApplication:
         self.state.copy_status = None
         self.state.mode = "working"
         self.state.status = "working"
+        self.state.spinner_frame = 0
         self.state.transcript.append(TranscriptItem("user", text))
 
         def run() -> None:
@@ -156,6 +170,60 @@ class TuiApplication:
 
         self.worker = threading.Thread(target=run, name="agent-task", daemon=True)
         self.worker.start()
+
+    def _is_busy(self) -> bool:
+        """Return whether a prompt or provider-backed slash command is active."""
+        return bool(self.harness.is_running or self._command_running)
+
+    def _start_background_command(self, command: str) -> None:
+        """Run a provider-backed slash command without blocking key input."""
+        if self._is_busy():
+            self.state.append_system("[busy] agent is still running; use /abort")
+            return
+        self._command_running = True
+        self._command_cancel.clear()
+        self.state.selection_anchor = None
+        self.state.selection_focus = None
+        self.state.copy_status = None
+        self.state.mode = "working"
+        self.state.status = "compacting"
+        self.state.spinner_frame = 0
+        self.state.active_tool = None
+        self.editor.clear()
+
+        def run() -> None:
+            try:
+                output = StringIO()
+                # handle_repl_command is a legacy print-oriented boundary. It
+                # is isolated to this worker and forwarded through the event
+                # queue once complete, so command output remains ordered with
+                # the user's slash command.
+                handle_repl_command(command, self.harness, output=output)
+                self.events.put(("command_output", output.getvalue()))
+            except BaseException as exc:
+                self.events.put(("command_exception", exc))
+            finally:
+                self.events.put(("command_done", None))
+
+        self.worker = threading.Thread(target=run, name="agent-command", daemon=True)
+        self.worker.start()
+
+    def _abort_background_command(self) -> None:
+        """Request cancellation of a provider-backed command such as compact."""
+        if not self._command_running:
+            return
+        if self._command_cancel.is_set():
+            return
+        self._command_cancel.set()
+        provider = getattr(self.harness, "provider", None)
+        abort = getattr(provider, "abort", None)
+        if callable(abort):
+            try:
+                abort()
+            except Exception:
+                # Cancellation is best effort; the worker still reports its
+                # eventual result and the main loop remains responsive.
+                pass
 
     def _drain_events(self) -> None:
         changed = False
@@ -183,6 +251,22 @@ class TuiApplication:
             elif kind == "done" and self.state.mode == "working":
                 self.state.mode = "idle"
                 self.state.status = "completed"
+            elif kind == "command_output":
+                text = str(value or "").strip()
+                if text:
+                    self.state.transcript.append(TranscriptItem("assistant", text))
+            elif kind == "command_exception":
+                self.state.mode = "error"
+                self.state.status = "error"
+                self.state.last_error = str(value)
+                self.state.append_system(str(value), error=True)
+            elif kind == "command_done":
+                cancelled = self._command_cancel.is_set()
+                self._command_running = False
+                self._command_cancel.clear()
+                if self.state.mode == "working" or self.state.status == "cancelling":
+                    self.state.mode = "idle"
+                    self.state.status = "cancelled" if cancelled else "completed"
         if changed:
             # New runtime output follows the live prompt, as in Pi's regular
             # main-screen mode. The user can scroll up again with the wheel.
@@ -221,8 +305,8 @@ class TuiApplication:
             self._draw()
             return
         if key == "MOUSE_WHEEL_UP":
-            if self.state.overlay_kind in {"resume", "tree"}:
-                self.state.overlay_index = max(0, self.state.overlay_index - 1)
+            if self._is_selector_overlay():
+                self._move_overlay_selection(-1)
                 self._draw()
                 return
             self.state.scroll_offset += 3
@@ -231,8 +315,8 @@ class TuiApplication:
             self._draw()
             return
         if key == "MOUSE_WHEEL_DOWN":
-            if self.state.overlay_kind in {"resume", "tree"}:
-                self.state.overlay_index = min(max(0, len(self.state.overlay_items) - 1), self.state.overlay_index + 1)
+            if self._is_selector_overlay():
+                self._move_overlay_selection(1)
                 self._draw()
                 return
             self.state.scroll_offset = max(0, self.state.scroll_offset - 3)
@@ -241,6 +325,12 @@ class TuiApplication:
             self._draw()
             return
         if key in {"PAGEUP", "PAGEDOWN"}:
+            if self._is_selector_overlay():
+                self._move_overlay_selection(
+                    (-1 if key == "PAGEUP" else 1) * self._overlay_item_capacity()
+                )
+                self._draw()
+                return
             delta =  max(1, self.terminal.rows // 2)
             self.state.scroll_offset = max(0, self.state.scroll_offset + (delta if key == "PAGEUP" else -delta))
             self.state.selection_anchor = None
@@ -250,7 +340,7 @@ class TuiApplication:
         mouse = self._mouse_event(key)
         if mouse is not None:
             kind, x, y = mouse
-            if self.state.overlay_kind in {"resume", "tree"} and kind in {"down", "up"}:
+            if self._is_selector_overlay() and kind in {"down", "up"}:
                 if self._select_overlay_row(y):
                     self._draw()
                     return
@@ -275,7 +365,7 @@ class TuiApplication:
             else:
                 self.state.mode = "exit"
             return
-        if key == "\x03" and not self.harness.is_running and self._has_selection():
+        if key == "\x03" and not self._is_busy() and self._has_selection():
             self._copy_selection()
             self._draw()
             return
@@ -287,10 +377,13 @@ class TuiApplication:
                 self.broker.cancel()
                 self.harness.abort()
                 self.state.status = "cancelling"
+            elif self._command_running:
+                self._abort_background_command()
+                self.state.status = "cancelling"
             self._draw()
             return
 
-        if self.harness.is_running:
+        if self._is_busy():
             if self.broker.pending:
                 if key.strip().lower() in {"y", "yes", "n", "no"}:
                     self.broker.submit(key)
@@ -306,7 +399,10 @@ class TuiApplication:
                 submitted = self.editor.handle(key)
                 if submitted is not None:
                     if submitted.strip() == "/abort":
-                        self.harness.abort()
+                        if self.harness.is_running:
+                            self.harness.abort()
+                        elif self._command_running:
+                            self._abort_background_command()
                         self.state.status = "cancelling"
                     else:
                         self.state.append_system("[busy] agent is still running; use /abort")
@@ -336,6 +432,8 @@ class TuiApplication:
                 self._open_drop_overlay(command)
             elif spec is not None and spec.name == "/tree":
                 self._open_tree_overlay()
+            elif spec is not None and spec.name == "/compact":
+                self._start_background_command(command)
             else:
                 self._run_command(command)
         else:
@@ -357,6 +455,41 @@ class TuiApplication:
         anchor, focus = self.state.selection_anchor, self.state.selection_focus
         return bool(anchor and focus and anchor != focus)
 
+    def _is_selector_overlay(self) -> bool:
+        return self.state.overlay_kind in {"resume", "tree"} or (
+            self.state.overlay_kind == "drop" and not self.state.overlay_value
+        )
+
+    def _overlay_item_capacity(self) -> int:
+        """Return the number of selector rows available above the fixed footer."""
+        kind = self.state.overlay_kind
+        fixed = 8 if kind == "resume" else 5 if kind == "drop" else 7
+        footer = len(self.renderer.footer_component.render(self.state, self.terminal.columns))
+        editor, _ = self.renderer.editor_component.render(self.state, self.terminal.columns)
+        return max(1, self.terminal.rows - footer - len(editor) - fixed)
+
+    def _ensure_overlay_visible(self) -> None:
+        if not self._is_selector_overlay() or not self.state.overlay_items:
+            self.state.overlay_scroll = 0
+            return
+        capacity = self._overlay_item_capacity()
+        maximum = max(0, len(self.state.overlay_items) - capacity)
+        start = max(0, min(int(self.state.overlay_scroll), maximum))
+        if self.state.overlay_index < start:
+            start = self.state.overlay_index
+        elif self.state.overlay_index >= start + capacity:
+            start = self.state.overlay_index - capacity + 1
+        self.state.overlay_scroll = max(0, min(start, maximum))
+
+    def _move_overlay_selection(self, delta: int) -> None:
+        if not self.state.overlay_items:
+            return
+        self.state.overlay_index = max(
+            0,
+            min(len(self.state.overlay_items) - 1, self.state.overlay_index + int(delta)),
+        )
+        self._ensure_overlay_visible()
+
     def _select_overlay_row(self, row: int) -> bool:
         """Map a mouse click to a visible selector row when possible."""
         if row < 0:
@@ -371,8 +504,10 @@ class TuiApplication:
             return False
         plain = self.renderer._clip(body[row], self.terminal.columns).strip()
         for index, item in enumerate(self.state.overlay_items):
-            if item and item[: min(24, len(item))] in plain:
+            visible_index = index - self.state.overlay_scroll
+            if 0 <= visible_index < self._overlay_item_capacity() and item and item[: min(24, len(item))] in plain:
                 self.state.overlay_index = index
+                self._ensure_overlay_visible()
                 return True
         return False
 
@@ -403,167 +538,19 @@ class TuiApplication:
         self.state.copy_status = "Copied" if ok else "Copy failed"
 
     def _open_resume_overlay(self) -> None:
-        catalog = self.harness.session_catalog()
-        if not catalog:
-            self.state.transcript.append(TranscriptItem("assistant", "[resume] no persisted sessions"))
-            self.state.status = "ready"
-            return
-        items: list[str] = []
-        for entry in catalog:
-            name = entry.get("name") or "(unnamed)"
-            prompt = str(entry.get("first_prompt") or "").replace("\n", " ").strip()
-            if len(prompt) > 52:
-                prompt = prompt[:49] + "..."
-            try:
-                modified = datetime.fromtimestamp(float(entry.get("modified", 0))).strftime("%Y-%m-%d %H:%M")
-            except (TypeError, ValueError, OSError):
-                modified = "unknown time"
-            items.append(f"{name}  [{str(entry.get('id', ''))[:12]}]  {modified}  {prompt}")
-        self.state.overlay_kind = "resume"
-        self.state.overlay_title = "Available sessions"
-        self.state.overlay_items = items
-        self.state.overlay_ids = [str(entry.get("id", "")) for entry in catalog]
-        self.state.overlay_index = 0
-        self.state.status = "selecting session"
-        self.editor.clear()
+        self.overlay.open_resume()
 
     def _open_drop_overlay(self, command: str) -> None:
-        parts = command.split()
-        if len(parts) != 2:
-            self._run_command(command)
-            return
-        self.state.overlay_kind = "drop"
-        self.state.overlay_title = ""
-        self.state.overlay_items = []
-        self.state.overlay_ids = []
-        self.state.overlay_value = parts[1]
-        self.state.status = "waiting for confirmation"
-        self.editor.clear()
+        self.overlay.open_drop(command)
 
     def _open_tree_overlay(self) -> None:
-        try:
-            nodes = self.harness.session_tree()
-        except Exception as exc:
-            self.state.transcript.append(TranscriptItem("assistant", f"[tree error] {exc}"))
-            return
-        if not nodes:
-            self.state.transcript.append(TranscriptItem("assistant", "[tree] session is empty"))
-            return
-        items: list[str] = []
-        identifiers: list[str] = []
-        selected = 0
-        for index, node in enumerate(nodes):
-            indent = "  " * min(8, int(getattr(node, "depth", 0)))
-            marker = "*" if getattr(node, "is_leaf", False) else "+" if getattr(node, "is_active", False) else "•"
-            role = str(getattr(node, "role", "unknown"))
-            preview = str(getattr(node, "preview", "") or "").replace("\n", " ")
-            items.append(f"{indent}{marker} {role}: {preview}")
-            identifiers.append(str(getattr(node, "message_id", "")))
-            if getattr(node, "is_leaf", False):
-                selected = index
-        self.state.overlay_kind = "tree"
-        self.state.overlay_title = "Session Tree"
-        self.state.overlay_items = items
-        self.state.overlay_ids = identifiers
-        self.state.overlay_index = selected
-        self.state.status = "selecting tree node"
-        self.editor.clear()
+        self.overlay.open_tree()
 
     def _handle_overlay_key(self, key: str) -> None:
-        kind = self.state.overlay_kind
-        if kind == "resume":
-            if key == "ESC":
-                self._close_overlay("[resume] cancelled")
-                return
-            if key == "UP":
-                self.state.overlay_index = max(0, self.state.overlay_index - 1)
-                self._draw()
-                return
-            if key == "DOWN":
-                self.state.overlay_index = min(len(self.state.overlay_items) - 1, self.state.overlay_index + 1)
-                self._draw()
-                return
-            selected = self.editor.handle(key)
-            if selected is None:
-                self._draw()
-                return
-            value = selected.strip()
-            catalog = self.harness.session_catalog()
-            if value.isdigit() and 1 <= int(value) <= len(catalog):
-                identifier = str(catalog[int(value) - 1]["id"])
-            elif value:
-                identifier = value
-            else:
-                identifier = (
-                    self.state.overlay_ids[self.state.overlay_index]
-                    if self.state.overlay_ids and self.state.overlay_index < len(self.state.overlay_ids)
-                    else str(catalog[self.state.overlay_index]["id"])
-                )
-            try:
-                path = self.harness.resume_session(identifier)
-                self._sync_session_view()
-                label = getattr(self.harness, "session_name", None) or "(unnamed)"
-                self.state.transcript.append(TranscriptItem("assistant", f"[resume] {label} - {self.harness.session_id} ({path.name})"))
-                self.state.status = "ready"
-            except Exception as exc:
-                self._close_overlay(f"[resume error] {exc}")
-            self.editor.clear()
-            self._draw()
-            return
-        if kind == "tree":
-            if key == "ESC":
-                self._close_overlay("[tree] cancelled")
-                return
-            if key in {"UP", "DOWN"}:
-                delta = -1 if key == "UP" else 1
-                self.state.overlay_index = max(0, min(len(self.state.overlay_items) - 1, self.state.overlay_index + delta))
-                self._draw()
-                return
-            selected = self.editor.handle(key)
-            if selected is None and key not in {"\r", "\n"}:
-                self._draw()
-                return
-            identifier = self.state.overlay_ids[self.state.overlay_index] if self.state.overlay_ids else ""
-            if selected and selected.strip():
-                identifier = selected.strip()
-            try:
-                self.harness.checkout(identifier or None)
-                self._sync_session_view()
-                self._close_overlay(f"[checkout] active message: {identifier or 'root'}")
-            except Exception as exc:
-                self._close_overlay(f"[checkout error] {exc}")
-            return
-        if kind == "drop":
-            if key == "ESC":
-                self._close_overlay("[drop] cancelled")
-                return
-            answer = key.strip().lower()
-            if answer not in {"y", "yes", "n", "no", "\r", "\n"}:
-                self._draw()
-                return
-            confirmed = answer in {"y", "yes"}
-            if answer in {"\r", "\n"}:
-                confirmed = False
-            if not confirmed:
-                self._close_overlay("[drop] cancelled")
-                return
-            try:
-                deleted = self.harness.drop_session(self.state.overlay_value)
-                self._close_overlay(f"[drop] deleted: {deleted.name}")
-            except Exception as exc:
-                self._close_overlay(f"[drop error] {exc}")
+        self.overlay.handle_key(key)
 
     def _close_overlay(self, message: str) -> None:
-        self.state.overlay_kind = None
-        self.state.overlay_title = ""
-        self.state.overlay_items = []
-        self.state.overlay_ids = []
-        self.state.overlay_value = ""
-        self.state.status = "ready"
-        self.editor.clear()
-        if message:
-            self.state.transcript.append(TranscriptItem("assistant", message))
-        self._draw()
+        self.overlay.close(message)
 
     def _run_command(self, command: str) -> None:
         spec = resolve_command(command.split()[0])
@@ -573,8 +560,7 @@ class TuiApplication:
         self.state.selection_anchor = None
         self.state.selection_focus = None
         self.state.copy_status = None
-        with redirect_stdout(output):
-            handled = handle_repl_command(command, self.harness)
+        handled = handle_repl_command(command, self.harness, output=output)
         self.state.session_id = self.harness.session_id
         self.state.session_name = getattr(self.harness, "session_name", None)
         after_leaf = getattr(getattr(self.harness, "session_store", None), "current_leaf_id", None)
@@ -591,7 +577,7 @@ class TuiApplication:
 def run_tui(harness: "Harness", approval_broker: "ApprovalBroker | None" = None) -> int:
     """Run the raw-mode TUI, falling back to line mode when not attached to a TTY."""
     if approval_broker is None:
-        from .repl import ApprovalBroker
+        from ..repl import ApprovalBroker
 
         approval_broker = ApprovalBroker()
     return TuiApplication(harness, approval_broker).run()

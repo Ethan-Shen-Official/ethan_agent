@@ -11,8 +11,8 @@ from providers.openai_compatible import OpenAICompatibleProvider
 from runtime.permissions import PERMISSION_MODES
 from .repl import ApprovalBroker, create_approval_handler
 from .commands import handle_repl_command
-from .renderer import render
-from .tui import run_tui
+from .ui.app import run_tui
+from .ui.renderer import render
 
 
 def positive_int(value: str) -> int:

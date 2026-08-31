@@ -61,12 +61,20 @@ class CompactionService:
         effective_start = self.context_builder.summarized_count
         working_messages = messages[effective_start:]
         tokens_before = self.projected_token_count(messages)
+        exceeds_range = tokens_before > self.config.context_window - self.config.reserve_tokens
+        if force and not exceeds_range:
+            raise SessionError("Nothing to compact (session too small)")
         if not force and not should_compact(tokens_before, self.config):
             return None
 
         cut = find_cut_point(working_messages, self.config.keep_recent_tokens)
         if cut is None or cut <= 0 or cut >= len(working_messages):
-            raise SessionError("not enough complete history to compact")
+            # Manual compaction should report the same actionable failure as
+            # Pi when the transcript cannot produce an older summary region.
+            # Automatic threshold compaction reaches this branch only after a
+            # real threshold hit, so it remains an error rather than silently
+            # writing an empty summary.
+            raise SessionError("Nothing to compact (session too small)")
         old_messages = working_messages[:cut]
         previous_record = self.latest_record()
         previous = (previous_record.metadata or {}).get("summary") if previous_record else None

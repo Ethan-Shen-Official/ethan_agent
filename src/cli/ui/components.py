@@ -58,7 +58,7 @@ class TranscriptComponent:
 
     def render(self, state: UiState, width: int) -> list[str]:
         r = self.renderer
-        if state.overlay_kind in {"resume", "tree"}:
+        if state.overlay_kind in {"resume", "tree"} or (state.overlay_kind == "drop" and not state.overlay_value):
             return self._render_selector(state, width)
         content: list[str] = [
             r._styled(r._clip(f" coding-agent  {state.cwd}", width), "36;1"),
@@ -102,12 +102,18 @@ class TranscriptComponent:
             # long.  Never let them become an unbounded physical terminal
             # line: the footer/editor must remain in their reserved rows.
             running = r._clip(self._tool_call_summary(state.active_tool, r), width)
+            if running.startswith("  ◌"):
+                frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+                glyph = frames[int(getattr(state, "spinner_frame", 0)) % len(frames)]
+                running = f"  {glyph}{running[3:]}"
             content.append(r._styled(running, "2"))
             if state.mode == "permission":
                 content.append(r._styled(r._clip("  permission required · press y to allow or n to deny", width), "33"))
-        elif state.mode == "working" and state.assistant_stream is None:
-            content.append(r._styled("  ◌ agent is working...", "2"))
-        if state.overlay_kind == "drop":
+        elif state.status == "compacting":
+            content.append(r._styled(self._working_indicator(state, "compacting context..."), "2"))
+        elif state.mode == "working":
+            content.append(r._styled(self._working_indicator(state, "Working..."), "2"))
+        if state.overlay_kind == "drop" and state.overlay_value:
             content.append("")
             content.append(r._styled(r._clip(f"  Permanently delete session '{state.overlay_value}'? [y/N]", width), "33;1"))
         return content
@@ -117,21 +123,58 @@ class TranscriptComponent:
         r = self.renderer
         content: list[str] = []
         if state.overlay_kind == "resume":
+            fixed_lines = 8
+        elif state.overlay_kind == "drop":
+            fixed_lines = 5
+        else:
+            fixed_lines = 7
+        footer = len(r.footer_component.render(state, width))
+        editor, _ = r.editor_component.render(state, width)
+        capacity = max(1, state.terminal_height - footer - len(editor) - fixed_lines)
+        maximum = max(0, len(state.overlay_items) - capacity)
+        start = max(0, min(int(getattr(state, "overlay_scroll", 0)), maximum))
+        if state.overlay_index < start:
+            start = state.overlay_index
+        elif state.overlay_index >= start + capacity:
+            start = state.overlay_index - capacity + 1
+        state.overlay_scroll = max(0, min(start, maximum))
+        visible_items = state.overlay_items[state.overlay_scroll : state.overlay_scroll + capacity]
+
+        if state.overlay_kind == "resume":
             content.append(r._styled(r._clip(" Resume Session (Current Folder)", width), "36;1"))
             content.append(r._clip(" ◉ Current Folder | ○ All  Name: All  Sort: Threaded", width))
             content.append(r._styled(r._clip(' tab scope · re:<pattern> regex · "phrase" exact', width), "2"))
             content.append(r._styled(r._clip(" ctrl+s sort · ctrl+n named · ctrl+d delete · ctrl+p path (off) · ctrl+r rename", width), "2"))
             content.append("")
             content.append(r._clip(">", width))
-            for index, item in enumerate(state.overlay_items):
+            for local_index, item in enumerate(visible_items):
+                index = state.overlay_scroll + local_index
                 prefix = "› " if index == state.overlay_index else "  "
                 line = r._clip(prefix + item, width)
                 if index == state.overlay_index:
                     content.append(r._selection_band(line, width))
                 else:
-                    content.append(line)
+                    role = state.overlay_roles[index] if index < len(state.overlay_roles) else ""
+                    content.append(r._styled(line, self._tree_role_style(role)))
             content.append("")
             content.append(r._styled(r._clip("enter resume · up/down move · esc cancel", width), "2"))
+            return content
+
+        if state.overlay_kind == "drop":
+            content.append(r._styled(r._clip(" Delete Session (Current Folder)", width), "36;1"))
+            content.append(r._styled(r._clip(" Current session is protected and hidden", width), "2"))
+            content.append("")
+            for local_index, item in enumerate(visible_items):
+                index = state.overlay_scroll + local_index
+                prefix = "› " if index == state.overlay_index else "  "
+                line = r._clip(prefix + item, width)
+                if index == state.overlay_index:
+                    content.append(r._selection_band(line, width))
+                else:
+                    role = state.overlay_roles[index] if index < len(state.overlay_roles) else ""
+                    content.append(r._styled(line, self._tree_role_style(role)))
+            content.append("")
+            content.append(r._styled(r._clip("enter delete · up/down move · esc cancel", width), "2"))
             return content
 
         content.append(r._styled(r._clip(" Session Tree", width), "36;1"))
@@ -139,13 +182,15 @@ class TranscriptComponent:
         content.append(r._styled(r._clip(" shift+l label · shift+t label time · filters ctrl+d/t/u/l/a · cycle ctrl+o", width), "2"))
         content.append(r._styled(r._clip(" Type to search:", width), "2"))
         content.append(r._styled("-" * width, "2"))
-        for index, item in enumerate(state.overlay_items):
+        for local_index, item in enumerate(visible_items):
+            index = state.overlay_scroll + local_index
             prefix = "› " if index == state.overlay_index else "  "
             line = r._clip(prefix + item, width)
             if index == state.overlay_index:
                 content.append(r._selection_band(line, width))
             else:
-                content.append(line)
+                role = state.overlay_roles[index] if index < len(state.overlay_roles) else ""
+                content.append(r._styled(line, self._tree_role_style(role)))
         content.append("")
         content.append(r._styled(r._clip("enter checkout · up/down move · esc cancel", width), "2"))
         return content
@@ -208,6 +253,24 @@ class TranscriptComponent:
         if summary.startswith("  ◌ running "):
             summary = summary[len("  ◌ running ") :]
         return self.renderer._clip(summary.strip(), width)
+
+    @staticmethod
+    def _tree_role_style(role: str) -> str:
+        """Apply a Pi-like visual distinction to tree node roles."""
+        return {
+            "user": "36;1",       # cyan, bold
+            "assistant": "97;1",  # bright white, bold
+            "tool": "33;1",       # yellow, bold
+            "system": "2",
+            "session_info": "2",
+        }.get(role, "")
+
+    @staticmethod
+    def _working_indicator(state: UiState, label: str) -> str:
+        """Return the current braille spinner frame and status label."""
+        frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        glyph = frames[int(getattr(state, "spinner_frame", 0)) % len(frames)]
+        return f"  {glyph} {label}"
 
     def invalidate(self) -> None:
         return None

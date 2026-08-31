@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from harness.approval import PromptApprovalHandler
 from .commands import handle_repl_command, is_exit_command, resolve_command
-from .renderer import render
+from .ui.renderer import render
 
 if TYPE_CHECKING:
     from harness.app import Harness

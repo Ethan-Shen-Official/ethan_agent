@@ -40,6 +40,10 @@ class UiState:
     cursor_position: int = 0
     mode: UiMode = "idle"
     status: str = "ready"
+    # Monotonic frame index used by the main-thread spinner.  Keeping this
+    # in state makes animation deterministic in tests and prevents worker
+    # threads from writing to the terminal concurrently with rendering.
+    spinner_frame: int = 0
     active_tool: ToolView | None = None
     turn: int = 0
     # ``tokens`` remains the aggregate counter used by older providers. The
@@ -77,8 +81,13 @@ class UiState:
     overlay_kind: OverlayKind | None = None
     overlay_title: str = ""
     overlay_items: list[str] = field(default_factory=list)
+    # Optional semantic role for each selector item.  Tree overlays use this
+    # to apply Pi-like role-specific emphasis while resume/drop keep it empty.
+    overlay_roles: list[str] = field(default_factory=list)
     overlay_ids: list[str] = field(default_factory=list)
     overlay_index: int = 0
+    # First visible item in a long selector (resume/drop/tree).
+    overlay_scroll: int = 0
     overlay_value: str = ""
     tools_expanded: bool = False
 

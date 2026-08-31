@@ -1,4 +1,5 @@
-from core.types import Message
+from core.types import Message, ToolResult
+from core.errors import SessionError
 from harness.app import Harness
 from providers.base import FakeProvider
 from runtime.compact import (
@@ -35,6 +36,13 @@ def test_compact_primitives_preserve_recent_messages():
     messages = [Message.user("goal"), Message.assistant("done"), Message.user("next")]
     assert find_valid_cut_points(messages) == [1, 2]
     assert find_cut_point(messages, 0) == 2
+    assert find_cut_point(messages, 100) is None
+    tool_tail = [
+        Message.user("goal"),
+        Message.assistant("done"),
+        Message.tool(ToolResult("c1", "read", "result")),
+    ]
+    assert find_cut_point(tool_tail, 0) == 1
     assert estimate_tokens(messages[0]) == 1
     assert should_compact(10, CompactConfig(context_window=10, reserve_tokens=1)) is True
 
@@ -58,9 +66,14 @@ def test_token_ledger_tracks_appends_and_ranges_incrementally():
 
 def test_manual_compact_persists_summary_and_projects_next_context():
     store = MemorySessionStore()
-    provider = FakeProvider(["first answer", "## Goal\nDo the work", "continued"])
-    harness = Harness(provider, session_store=store)
-    list(harness.prompt("do the work"))
+    store.append(Message.user("do the work " * 20))
+    store.append(Message.assistant("first answer " * 20))
+    provider = FakeProvider(["## Goal\nDo the work", "continued"])
+    harness = Harness(
+        provider,
+        session_store=store,
+        compact_config=CompactConfig(context_window=10, reserve_tokens=0, keep_recent_tokens=1),
+    )
 
     result = harness.compact()
 
@@ -84,11 +97,20 @@ def test_manual_compact_persists_summary_and_projects_next_context():
 
 def test_compaction_restores_from_session_store():
     store = MemorySessionStore()
-    first = Harness(FakeProvider(["answer", "summary"]), session_store=store)
-    list(first.prompt("goal"))
+    store.append(Message.user("goal " * 20))
+    store.append(Message.assistant("answer " * 20))
+    first = Harness(
+        FakeProvider(["summary"]),
+        session_store=store,
+        compact_config=CompactConfig(context_window=10, reserve_tokens=0, keep_recent_tokens=1),
+    )
     first.compact()
 
-    resumed = Harness(FakeProvider(["resumed"]), session_store=store)
+    resumed = Harness(
+        FakeProvider(["resumed"]),
+        session_store=store,
+        compact_config=CompactConfig(context_window=10, reserve_tokens=0, keep_recent_tokens=1),
+    )
     list(resumed.prompt("next"))
     snapshot = resumed.context_snapshot()
     assert snapshot is not None
@@ -108,7 +130,9 @@ def test_threshold_compact_runs_after_completed_prompt():
     events = list(harness.prompt("goal"))
 
     assert [event.kind for event in events][-2:] == ["compaction_start", "compaction_end"]
-    assert len(store._compactions) == 1
+    assert events[-1].data["is_error"] is True
+    assert "Nothing to compact (session too small)" in events[-1].data["error"]
+    assert len(store._compactions) == 0
 
 
 def test_compact_repl_command_uses_harness_boundary(capsys):
@@ -122,3 +146,39 @@ def test_compact_repl_command_uses_harness_boundary(capsys):
 
     assert handle_repl_command("/compact", HarnessStub()) is True
     assert "summarized 2 messages; kept 3" in capsys.readouterr().out
+
+
+def test_manual_compact_reports_pi_style_error_for_small_session():
+    store = MemorySessionStore()
+    harness = Harness(FakeProvider([]), session_store=store)
+
+    try:
+        harness.compact()
+    except SessionError as exc:
+        assert str(exc) == "Nothing to compact (session too small)"
+    else:
+        raise AssertionError("compact should reject an empty session")
+
+
+def test_auto_compact_skips_when_context_is_below_range():
+    store = MemorySessionStore()
+    store.append(Message.user("small"))
+    harness = Harness(
+        FakeProvider([]),
+        session_store=store,
+        compact_config=CompactConfig(context_window=100, reserve_tokens=0),
+    )
+
+    assert harness.compact(force=False) is None
+    assert store._compactions == []
+
+
+def test_compact_command_formats_small_session_failure(capsys):
+    from cli.main import handle_repl_command
+
+    class HarnessStub:
+        def compact(self):
+            raise SessionError("Nothing to compact (session too small)")
+
+    assert handle_repl_command("/compact", HarnessStub()) is True
+    assert capsys.readouterr().out.strip() == "Error: Compaction failed: Nothing to compact (session too small)"

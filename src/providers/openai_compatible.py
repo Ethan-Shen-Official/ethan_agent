@@ -161,7 +161,24 @@ class OpenAICompatibleProvider:
             if isinstance(usage, dict):
                 tokens = usage.get("total_tokens") or usage.get("completion_tokens") or 0
                 if isinstance(tokens, int) and tokens:
-                    yield ProviderEvent(kind="usage", tokens=tokens)
+                    prompt_tokens = usage.get("prompt_tokens") or 0
+                    completion_tokens = usage.get("completion_tokens") or 0
+                    prompt_details = usage.get("prompt_tokens_details") or {}
+                    cache_read = (
+                        usage.get("cache_read_tokens")
+                        or usage.get("cached_tokens")
+                        or prompt_details.get("cached_tokens", 0)
+                        or 0
+                    )
+                    cache_write = usage.get("cache_write_tokens") or usage.get("cache_creation_tokens") or 0
+                    yield ProviderEvent(
+                        kind="usage",
+                        tokens=tokens,
+                        input_tokens=int(prompt_tokens or 0),
+                        output_tokens=int(completion_tokens or 0),
+                        cache_read_tokens=int(cache_read or 0),
+                        cache_write_tokens=int(cache_write or 0),
+                    )
             for choice in chunk.get("choices", []):
                 delta = choice.get("delta") or {}
                 content = delta.get("content")

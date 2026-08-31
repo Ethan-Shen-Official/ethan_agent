@@ -69,10 +69,14 @@ class ProviderEvent:
     tool_call: ToolCall | None = None
     tokens: int = 0
     error: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cost: float = 0.0
 
 
 @dataclass(frozen=True)
 class AgentEvent:
     kind: str
     data: dict[str, Any] = field(default_factory=dict)
-

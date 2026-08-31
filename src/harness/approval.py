@@ -11,14 +11,16 @@ from runtime.permissions import PermissionRequest
 class PromptApprovalHandler:
     """Prompt once for an operation that the permission policy marked ``ask``."""
 
-    def __init__(self, input_fn: Callable[[str], str] | None = None) -> None:
+    def __init__(self, input_fn: Callable[[str], str] | None = None, *, display: bool = True) -> None:
         self._input = input_fn or input
+        self._display = display
 
     def __call__(self, request: PermissionRequest) -> bool:
         details = _display_arguments(request.arguments)
-        print(f"\nPermission requested: {request.tool_name} ({request.reason})")
-        if details:
-            print(details)
+        if self._display:
+            print(f"\nPermission requested: {request.tool_name} ({request.reason})")
+            if details:
+                print(details)
         try:
             answer = self._input("Allow this operation? [y/N] ")
         except (EOFError, KeyboardInterrupt):

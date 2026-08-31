@@ -9,9 +9,10 @@ from harness.app import Harness
 from harness.approval import PromptApprovalHandler
 from providers.openai_compatible import OpenAICompatibleProvider
 from runtime.permissions import PERMISSION_MODES
-from .commands import handle_repl_command, is_exit_command
-from .repl import ApprovalBroker, create_approval_handler, run_repl
+from .repl import ApprovalBroker, create_approval_handler
+from .commands import handle_repl_command
 from .renderer import render
+from .tui import run_tui
 
 
 def positive_int(value: str) -> int:
@@ -79,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         for event in harness.prompt(args.prompt):
             render(event)
         return 0
-    return run_repl(harness, approval_broker)
+    return run_tui(harness, approval_broker)
 
 
 if __name__ == "__main__":

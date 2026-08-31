@@ -46,6 +46,13 @@ class AgentLoop:
             text_parts: list[str] = []
             calls: list[ToolCall] = []
             usage = 0
+            usage_details = {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "cost": 0.0,
+            }
             provider_error: str | None = None
             try:
                 for provider_event in self.stream_model(request):
@@ -56,6 +63,8 @@ class AgentLoop:
                         calls.append(provider_event.tool_call)
                     elif provider_event.kind == "usage":
                         usage += provider_event.tokens
+                        for field in usage_details:
+                            usage_details[field] += getattr(provider_event, field, 0) or 0
                     elif provider_event.kind == "error":
                         provider_error = provider_event.error or "provider error"
                         break
@@ -70,6 +79,12 @@ class AgentLoop:
                 yield self._finish(state, "provider_error")
                 return
             state.total_tokens += usage
+            if usage:
+                # Keep provider-specific usage out of the core contract while
+                # exposing the aggregate count to transient UI consumers.
+                usage_data = {"tokens": usage}
+                usage_data.update({key: value for key, value in usage_details.items() if value})
+                yield AgentEvent("usage", usage_data)
             yield AgentEvent("assistant_message", {"message": assistant})
             calls = self.finalize_assistant(assistant, state)
             if not calls:

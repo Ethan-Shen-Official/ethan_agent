@@ -26,9 +26,11 @@ class ApprovalBroker:
 
     def __init__(self) -> None:
         self._pending: Queue[_ApprovalRequest] = Queue()
+        self._pending_event = threading.Event()
 
     def ask(self, prompt: str) -> str:
         request = _ApprovalRequest()
+        self._pending_event.set()
         self._pending.put(request)
         request.event.wait()
         return "y" if request.answer else "n"
@@ -38,6 +40,8 @@ class ApprovalBroker:
             request = self._pending.get_nowait()
         except Empty:
             return False
+        if self._pending.empty():
+            self._pending_event.clear()
         request.answer = answer.strip().lower() in {"y", "yes"}
         request.event.set()
         return True
@@ -47,17 +51,20 @@ class ApprovalBroker:
             try:
                 request = self._pending.get_nowait()
             except Empty:
+                self._pending_event.clear()
                 return
             request.answer = False
             request.event.set()
 
     @property
     def pending(self) -> bool:
-        return not self._pending.empty()
+        return self._pending_event.is_set()
 
 
 def create_approval_handler(broker: ApprovalBroker) -> PromptApprovalHandler:
-    return PromptApprovalHandler(broker.ask)
+    # The raw TUI renders the request itself. Printing from the worker would
+    # race with full-screen redraws and make the prompt disappear.
+    return PromptApprovalHandler(broker.ask, display=False)
 
 
 def run_repl(harness: "Harness", approval_broker: ApprovalBroker | None = None) -> int:

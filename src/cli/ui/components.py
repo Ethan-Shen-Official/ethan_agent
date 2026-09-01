@@ -14,6 +14,18 @@ from .markdown import render_markdown, render_markdown_styled
 from .tool_render import edit_diff_lines, is_diff_line
 
 
+HELLO_USER_ART = (
+    r" _   _      _ _         _   _   _               _ ",
+    r"| | | | ___| | | ___   | | | | | |___  ___ _ __| |",
+    r"| |_| |/ _ \ | |/ _ \  | | | | | / __|/ _ \ '__| |",
+    r"|  _  |  __/ | | (_) | |_| | |_| \__ \  __/ |  |_|",
+    r"|_| |_|\___|_|_|\___/  (_)  \___/|___/\___|_|  (_)",
+    r"                                                  ",
+)
+
+HELLO_USER_LABEL = "Hello!User"
+
+
 class Component(Protocol):
     def render(self, width: int) -> list[str]: ...
 
@@ -61,21 +73,13 @@ class TranscriptComponent:
         r = self.renderer
         if state.overlay_kind in {"resume", "tree"} or (state.overlay_kind == "drop" and not state.overlay_value):
             return self._render_selector(state, width)
-        if (
-            not state.transcript
-            and not state.input_text
-            and state.active_tool is None
-            and state.status == "ready"
-            and state.overlay_kind is None
-        ):
-            return self._render_startup(state, width)
-        content: list[str] = [
-            r._styled(r._clip(f" coding-agent  {state.cwd}", width), "36;1"),
-            r._styled(r._clip(f" session {state.session_id[:12] or '-'}  {state.status}", width), "2"),
-            "",
-        ]
-        for item in state.transcript:
-            if item.kind in {"user", "assistant", "tool"} and content and content[-1] != "":
+        content: list[str] = self._render_header(state, width)
+        content.append("")
+        for item_index, item in enumerate(state.transcript):
+            # A block's own padding is colored; this separator is deliberately
+            # unstyled so adjacent user/system/tool blocks cannot visually
+            # merge, especially after slash-command output.
+            if item_index:
                 content.append("")
             # ToolExecutionComponent owns its title line; unlike assistant
             # prose it does not use the large conversation bullet.
@@ -97,9 +101,13 @@ class TranscriptComponent:
                     content.append(r._band(label + line, r._USER_FG, r._USER_BG, width))
                 content.append(r._band("", r._USER_FG, r._USER_BG, width))
             elif item.kind == "system":
+                # Slash-command output is ordinary conversation text. Keep
+                # its role color, but do not wrap it in a full-width card;
+                # command results should sit on the terminal's normal
+                # background between the surrounding transcript blocks.
                 for index, line in enumerate(wrapped):
                     label = prefix if index == 0 else " " * len(prefix)
-                    content.append(r._band(label + line, r._SYSTEM_FG, r._SYSTEM_BG, width))
+                    content.append(r._styled(label + line, r._SYSTEM_FG))
             elif item.kind == "error":
                 for index, line in enumerate(wrapped):
                     label = prefix if index == 0 else " " * len(prefix)
@@ -118,16 +126,16 @@ class TranscriptComponent:
                     if has_header and index == 0:
                         fg = "36;1"
                     else:
-                        fg = {"removed": "31", "added": "32", "context": "37"}.get(
-                            style, "97" if item.tool_error else "37"
+                        fg = {"removed": "91", "added": "92", "context": "97"}.get(
+                            style, "97"
                         )
                     content.append(r._band(label + line, fg, self._tool_bg(item), width))
                 content.append(r._band("", r._TOOL_FG, self._tool_bg(item), width))
             else:
-                # Normal assistant prose uses readable terminal gray; dim is
-                # reserved for metadata and transient status text.
-                content.append(r._styled(prefix + wrapped[0], "37"))
-                content.extend(r._styled("  " + line, "37") for line in wrapped[1:])
+                # Normal assistant prose uses bright white; dim is reserved
+                # for metadata and transient status text.
+                content.append(r._styled(prefix + wrapped[0], "97"))
+                content.extend(r._styled("  " + line, "97") for line in wrapped[1:])
         if state.active_tool is not None:
             # Tool arguments (especially ``write.content``) can be megabytes
             # long.  Never let them become an unbounded physical terminal
@@ -141,42 +149,40 @@ class TranscriptComponent:
             if state.mode == "permission" or state.status == "waiting for approval":
                 content.append(r._styled(r._clip("  permission required · press y to allow or n to deny", width), "33;1"))
         elif state.status == "compacting":
-            content.append(r._styled(self._working_indicator(state, "compacting context..."), "2"))
+            content.append(r._styled(self._working_indicator(state, "compacting context..."), "93;1"))
         elif state.mode == "working":
-            content.append(r._styled(self._working_indicator(state, "Working..."), "2"))
+            content.append(r._styled(self._working_indicator(state, "Working..."), "93;1"))
         if state.overlay_kind == "drop" and state.overlay_value:
             content.append("")
             content.append(r._styled(r._clip(f"  Permanently delete session '{state.overlay_value}'? [y/N]", width), "33;1"))
         return content
 
-    def _render_startup(self, state: UiState, width: int) -> list[str]:
-        """Render Pi's compact first-screen onboarding header."""
+    def _render_header(self, state: UiState, width: int) -> list[str]:
+        """Render an ASCII logo and runtime metadata at transcript top."""
         r = self.renderer
-        lines = [
-            r._styled(r._clip(" coding-agent", width), "36;1")
-            + r._styled(" v0.1.0", "90"),
-            r._styled(
-                r._clip(
-                    " escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more",
-                    width,
-                ),
-                "90",
-            ),
-            r._styled(
-                r._clip(" Press ctrl+o to show full startup help and loaded resources.", width),
-                "90",
-            ),
-            "",
-            r._styled(
-                r._clip(
-                    " Coding-agent can explain its own features and look up its docs. Ask it how to use or extend it.",
-                    width,
-                ),
-                "90",
-            ),
+        metadata = [
+            ("coding-agent", "v0.1.0"),
+            ("model", state.model_name or "unknown"),
+            ("workspace", state.cwd),
         ]
-        lines.extend(("", r._styled(r._clip("[Context]", width), "33;1")))
-        lines.extend(r._styled(r._clip(f"  {name}", width), "90") for name in state.startup_context)
+        logo = [f" {line}" for line in HELLO_USER_ART]
+        metadata_lines = [f" {label:<12} {value}" for label, value in metadata]
+        # Keep the reference layout on wide terminals. On narrow terminals
+        # stack the metadata below the logo so neither column corrupts text.
+        if width >= 150:
+            gap = 4
+            logo_width = max(r._display_width(line) for line in logo)
+            lines = []
+            for index, line in enumerate(logo):
+                suffix = metadata_lines[index] if index < len(metadata_lines) else ""
+                lines.append(r._styled(line.ljust(logo_width) + " " * gap + suffix, "96;1"))
+        else:
+            lines = [r._styled(r._clip(line, width), "96;1") for line in logo]
+            lines.extend(r._styled(r._clip(line, width), "96;1") for line in metadata_lines)
+        lines.append(r._styled(r._clip(f" {HELLO_USER_LABEL}", width), "97;1"))
+        lines.extend(("", r._styled(r._clip(" Tip: Type /help for commands or /resume to continue previous work.", width), "96;1")))
+        lines.extend(("", r._styled(r._clip("[Context]", width), "93;1")))
+        lines.extend(r._styled(r._clip(f"  {name}", width), "97") for name in state.startup_context)
         return lines
 
     def _render_selector(self, state: UiState, width: int) -> list[str]:
@@ -338,12 +344,12 @@ class TranscriptComponent:
             colon = separator_space
         # Keep a single block inset; the summary text historically carried
         # two leading spaces for the old plain REPL layout.
-        rendered = self.renderer._styled(" " + marker.lstrip(), "90")
+        rendered = self.renderer._styled(" " + marker.lstrip(), "37")
         # Keep the human-readable call label contiguous while highlighting the
         # tool name as a distinct Pi-style title token.
         rendered += self.renderer._styled(separator + name, "36;1")
         if arguments:
-            rendered += self.renderer._styled((": " if colon == ": " else " ") + arguments, "90")
+            rendered += self.renderer._styled((": " if colon == ": " else " ") + arguments, "97")
         return rendered
 
     def _tool_result_summary(self, item: TranscriptItem, width: int) -> str:

@@ -61,6 +61,7 @@ class UiState:
     auto_compact: bool = True
     model_name: str = ""
     thinking_level: str = ""
+    permission_mode: str = "ask"
     session_name: str | None = None
     last_error: str | None = None
     terminal_width: int = 80

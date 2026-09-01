@@ -9,6 +9,7 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from core.errors import SessionError
 from ..commands import handle_repl_command, is_exit_command, resolve_command
 from .input import InputEditor
 from .overlay import OverlayController
@@ -39,16 +40,22 @@ class TuiApplication:
         # on the same worker channel as prompts so the input loop stays live.
         self._command_running = False
         self._command_cancel = threading.Event()
+        try:
+            permission_mode = str(harness.permission_mode())
+        except Exception:
+            permission_mode = "ask"
         self.state = UiState(
             cwd=str(harness.execution_env.cwd),
             session_id=harness.session_id,
             terminal_width=self.terminal.columns,
             terminal_height=self.terminal.rows,
             model_name=self._model_name(harness),
+            permission_mode=permission_mode,
             session_name=getattr(harness, "session_name", None),
         )
         self.state.startup_context = self._discover_startup_context(self.state.cwd)
         self._restore_transcript()
+        self._restore_context_usage()
 
     @staticmethod
     def _discover_startup_context(cwd: str) -> tuple[str, ...]:
@@ -98,12 +105,57 @@ class TuiApplication:
                     )
                 )
 
+    def _restore_context_usage(self) -> None:
+        """Seed the footer's context meter from the restored transcript.
+
+        Provider usage events are intentionally transient and are not part of
+        the JSONL message contract.  A resumed TUI therefore cannot recover
+        the provider's exact prompt-token count, but it can use the same
+        chars/4 projection that drives compaction.  This prevents a resumed
+        non-empty session from incorrectly displaying an empty (0%) context.
+        """
+        for field in (
+            "tokens",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+        ):
+            setattr(self.state, field, 0)
+        self.state.cost = 0.0
+        self.state.cache_hit_rate = None
+
+        config = getattr(self.harness, "compact_config", None)
+        try:
+            context_window = int(getattr(config, "context_window", 0) or 0)
+        except (TypeError, ValueError):
+            context_window = 0
+        self.state.context_window = max(0, context_window)
+        if not context_window:
+            self.state.context_percent = None
+            return
+
+        projected = 0
+        service = getattr(self.harness, "compaction", None)
+        estimate = getattr(service, "projected_token_count", None)
+        if callable(estimate):
+            try:
+                projected = max(0, int(estimate()))
+            except (TypeError, ValueError, SessionError):
+                projected = 0
+            except Exception:
+                # A custom harness may not expose a usable compaction ledger;
+                # context restoration must never make the TUI fail to start.
+                projected = 0
+        self.state.context_percent = min(100.0, projected * 100.0 / context_window)
+
     def _sync_session_view(self) -> None:
         """Replace the viewport transcript after a session/branch switch."""
         self.state.session_id = self.harness.session_id
         self.state.session_name = getattr(self.harness, "session_name", None)
         self.state.transcript.clear()
         self._restore_transcript()
+        self._restore_context_usage()
         loop_state = getattr(self.harness, "state", None)
         self.state.turn = int(getattr(loop_state, "turn_count", 0) or 0)
         self.state.active_tool = None
@@ -164,6 +216,10 @@ class TuiApplication:
         # frame so typed characters and cursor movement are visible.
         self.state.input_text = self.editor.text
         self.state.cursor_position = self.editor.cursor
+        try:
+            self.state.permission_mode = str(self.harness.permission_mode())
+        except Exception:
+            pass
         self.renderer.render(self.state)
 
     def _start_prompt(self, text: str) -> None:
@@ -271,7 +327,7 @@ class TuiApplication:
             elif kind == "command_output":
                 text = str(value or "").strip()
                 if text:
-                    self.state.transcript.append(TranscriptItem("assistant", text))
+                    self.state.transcript.append(TranscriptItem("system", text))
             elif kind == "command_exception":
                 self.state.mode = "error"
                 self.state.status = "error"
@@ -586,7 +642,7 @@ class TuiApplication:
             self.state.transcript.append(TranscriptItem("user", command))
         text = output.getvalue().strip()
         if text:
-            self.state.transcript.append(TranscriptItem("assistant", text))
+            self.state.transcript.append(TranscriptItem("system", text))
         elif not handled:
             self.state.transcript.append(TranscriptItem("assistant", f"unknown command: {command}"))
 

@@ -139,16 +139,81 @@ def test_screen_renderer_reserves_editor_and_footer_and_hides_completed_tool():
     assert "agent> hello" in terminal.output.getvalue()
 
 
-def test_empty_tui_uses_pi_style_startup_header_and_context():
+def test_empty_tui_uses_stable_ascii_header_and_context():
     terminal = _FakeTerminal()
+    terminal.rows = 30
     state = UiState(cwd="D:/workspace", startup_context=("AGENTS.md",))
     lines, _ = ScreenRenderer(terminal)._lines(state)
     output = "\n".join(lines)
-    assert "coding-agent v0.1.0" in output
-    assert "escape interrupt" in output
-    assert "Press ctrl+o" in output
+    assert "| | | |" in output
+    assert "coding-agent" in output
+    assert "Tip: Type /help" in output
     assert "[Context]" in output
     assert "AGENTS.md" in output
+
+
+def test_startup_greeting_remains_visible_while_typing():
+    terminal = _FakeTerminal()
+    terminal.rows = 30
+    state = UiState(cwd="D:/workspace", input_text="hello", cursor_position=5)
+    lines, _ = ScreenRenderer(terminal)._lines(state)
+    output = "\n".join(lines)
+    assert "| | | |" in output
+    assert "agent> hello" in output
+
+
+def test_header_labels_hello_user_and_does_not_show_permission_mode():
+    terminal = _FakeTerminal()
+    terminal.rows = 30
+    state = UiState(cwd="D:/workspace", permission_mode="bypass_permissions")
+    output = "\n".join(ScreenRenderer(terminal)._lines(state)[0])
+    assert "Hello!User" in output
+    assert "permission" not in output.lower()
+
+
+def test_resumed_context_meter_is_seeded_from_compaction_projection():
+    from types import SimpleNamespace
+
+    class HarnessStub:
+        is_running = False
+        session_id = "session-id"
+        execution_env = SimpleNamespace(cwd="D:/workspace")
+        compact_config = SimpleNamespace(context_window=200)
+        compaction = SimpleNamespace(projected_token_count=lambda: 40)
+
+    app = TuiApplication(HarnessStub(), ApprovalBroker())
+    assert app.state.context_window == 200
+    assert app.state.context_percent == 20.0
+
+
+def test_slash_command_output_has_unstyled_gap_after_user_block():
+    terminal = _FakeTerminal()
+    terminal.rows = 40
+    state = UiState(cwd="D:/workspace")
+    state.transcript = [
+        TranscriptItem("user", "/help"),
+        TranscriptItem("system", "Available commands: /help"),
+    ]
+    lines, _ = ScreenRenderer(terminal)._lines(state)
+    user_end = next(i for i, line in enumerate(lines) if line.strip().startswith("› /help"))
+    # User blocks end with a colored padding row, then a plain separator row
+    # before the command output starts.
+    assert "Available commands" in "\n".join(lines[user_end + 1 :])
+    command_index = next(i for i, line in enumerate(lines) if "Available commands" in line)
+    assert lines[command_index - 1] == ""
+
+
+def test_slash_command_output_uses_normal_terminal_background():
+    class TtyTerminal(_FakeTerminal):
+        is_tty = True
+
+    terminal = TtyTerminal()
+    terminal.rows = 40
+    state = UiState(cwd="D:/workspace")
+    state.transcript = [TranscriptItem("system", "Available commands: /help")]
+    output = "\n".join(ScreenRenderer(terminal)._lines(state)[0])
+    assert "Available commands" in output
+    assert "48;2;55;55;65" not in output
 
 
 def test_startup_context_does_not_inherit_parent_directory():

@@ -207,7 +207,7 @@ class ScreenRenderer:
         # The editor's lower border is the visual separator.  Keeping the
         # footer to two rows avoids a duplicated horizontal rule while still
         # reserving a fixed status block at the bottom of the viewport.
-        return [self._styled(self._clip(f" {cwd}", width), "90"), self._styled(self._clip(line, width), "90")]
+        return [self._styled(self._clip(f" {cwd}", width), "97"), self._styled(self._clip(line, width), "97")]
 
     # Compatibility helpers retained for callers that used the early P0
     # renderer directly; layout now goes through FooterComponent.
@@ -225,11 +225,11 @@ class ScreenRenderer:
             or (state.overlay_kind == "drop" and bool(state.overlay_value))
         )
         prompt = " select> " if selecting else " confirm(y/n)> " if confirming else " agent> "
-        prompt_style = "33;1" if confirming else "37"
+        prompt_style = "33;1" if confirming else "97"
         prompt_width = self._display_width(prompt)
         available = max(1, width - prompt_width)
         raw_lines = state.input_text.split("\n") or [""]
-        rendered: list[str] = [self._styled("─" * width, "2")]
+        rendered: list[str] = [self._styled("─" * width, "90")]
         absolute = max(0, min(len(state.input_text), state.cursor_position))
         before = state.input_text[:absolute]
         cursor_row = 0
@@ -265,7 +265,7 @@ class ScreenRenderer:
             if value and self._display_width(value) % available == 0:
                 cursor_col = prompt_width + available
         cursor_row = min(max(0, len(rendered) - 1), cursor_row)
-        rendered.append(self._styled("─" * width, "2"))
+        rendered.append(self._styled("─" * width, "90"))
         # The top border occupies one physical row in the editor component.
         return rendered, (cursor_row + 1, min(width - 1, cursor_col))
 

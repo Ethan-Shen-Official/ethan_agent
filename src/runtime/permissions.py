@@ -1,8 +1,8 @@
 """Permission decisions used by the harness preflight pipeline.
 
-The policy decides whether an operation may start.  The execution environment
+The policy decides whether an operation may start. The execution environment
 also reuses the pure shell safety predicates as a non-bypassable capability
-boundary for compatibility callers that do not install this policy.
+boundary for callers that do not install this policy.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ class PermissionManager(Protocol):
 
 
 class AllowAllPermissions:
-    """Compatibility policy for trusted embedding and low-level tests."""
+    """Explicit allow policy for trusted embedding and low-level tests."""
 
     def check(self, tool_name: str, arguments: dict[str, Any]) -> PermissionDecision:
         return PermissionDecision("allow", reason="allow-all policy")
@@ -72,9 +72,9 @@ class WorkspacePermissionPolicy:
     are considered, so a bypass mode cannot turn them into writable targets.
     """
 
-    READ_ONLY_TOOLS = frozenset({"read_file", "list_dir", "search"})
+    READ_ONLY_TOOLS = frozenset({"read", "ls", "find", "grep"})
     EDIT_TOOLS = frozenset({"write", "edit"})
-    SHELL_TOOLS = frozenset({"exe"})
+    SHELL_TOOLS = frozenset({"bash", "powershell"})
     _PROTECTED_SHELL_PATH = re.compile(
         r"(?i)(?<![A-Za-z0-9_.-])(?:\.agent|\.git)(?![A-Za-z0-9_.-])"
     )
@@ -145,8 +145,8 @@ class WorkspacePermissionPolicy:
         return PermissionDecision("ask", "tool is not in the workspace allowlist", f"unknown:{tool_name}")
 
     def _protected_operation_rule(self, tool_name: str, arguments: dict[str, Any]) -> str | None:
-        if tool_name == "exe":
-            command = arguments.get("cmd")
+        if tool_name in {"bash", "powershell"}:
+            command = arguments.get("command")
             if not isinstance(command, str):
                 return None
             if self._is_destructive_shell_command(command):
@@ -285,8 +285,8 @@ def is_protected_shell_command(command: str) -> bool:
     """Return whether a shell command mentions protected runtime metadata.
 
     This helper is also used by :class:`LocalExecutionEnv` as a final
-    capability check, so callers that intentionally use ``AllowAllPermissions``
-    cannot mutate ``.agent`` or ``.git`` through a literal shell path.
+    capability check, so an allow policy cannot mutate ``.agent`` or ``.git``
+    through a literal shell path.
     """
     return bool(
         re.search(

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-
 from .base import Tool
 
 
@@ -22,4 +21,3 @@ class ToolRegistry:
 
     def specs(self):
         return tuple(tool.spec for tool in self._tools.values())
-

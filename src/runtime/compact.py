@@ -157,7 +157,7 @@ def file_operations(messages: Iterable[Message]) -> dict[str, list[str]]:
             path = call.arguments.get("path")
             if not isinstance(path, str):
                 continue
-            if call.name in {"read_file", "search", "list_dir"}:
+            if call.name in {"read", "find", "ls", "grep"}:
                 read.add(path)
             elif call.name in {"write", "edit"}:
                 modified.add(path)

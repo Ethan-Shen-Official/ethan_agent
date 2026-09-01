@@ -8,6 +8,7 @@ from core.errors import ToolError, format_tool_error
 from core.hooks import ToolHookContext, ToolHookDecision
 from core.types import AgentEvent, ToolResult
 from .base import ToolContext
+from .details import ToolDetailsStore
 from .registry import ToolRegistry
 from .truncate import (
     DEFAULT_MAX_BYTES,
@@ -42,10 +43,15 @@ class ToolExecutor:
         self.context = context
         self.hooks = hooks
         self.output_limits = output_limits or ToolOutputLimits()
+        self.details_store = getattr(context, "details_store", None) or ToolDetailsStore()
 
     def bind_cancel_event(self, cancel_event: threading.Event | None) -> None:
         """Bind the cancellation event for the one active Harness run."""
         self.context = replace(self.context, cancel_event=cancel_event)
+
+    def tool_details(self, call_id: str):
+        """Return transient rich details for a completed or active call."""
+        return self.details_store.get(call_id) if self.details_store is not None else None
 
     def execute(self, calls):
         for call in calls:
@@ -63,6 +69,7 @@ class ToolExecutor:
                     ),
                 )
                 terminate = False
+                updates = []
             else:
                 tool = self.registry.get(call.name)
                 if tool is None:
@@ -75,26 +82,53 @@ class ToolExecutor:
                         ),
                     )
                     terminate = False
+                    updates = []
                 else:
-                    result, terminate = self._execute_single(tool, call)
+                    result, terminate, updates = self._execute_single(tool, call)
+                    for update in updates:
+                        yield update
             yield AgentEvent("tool_result", {"result": result, "terminate": terminate})
             yield AgentEvent("tool_progress", {"id": call.id, "complete": True})
 
     def _execute_single(self, tool, call):
+        updates: list[AgentEvent] = []
+        update_callback = lambda data: updates.append(
+            AgentEvent("tool_update", {"id": call.id, "name": call.name, **dict(data)})
+        )
+        tool_context = replace(
+            self.context,
+            call_id=call.id,
+            on_update=update_callback,
+            details_store=self.details_store,
+        )
         try:
-            self._validate_arguments(tool.spec.input_schema, call.arguments)
+            arguments = self._prepare_arguments(tool, call.arguments)
+            self._validate_arguments(tool.spec.input_schema, arguments)
+            if arguments != call.arguments:
+                call = type(call)(call.id, call.name, arguments)
             original_call = call
             call = self._before_tool(tool, call)
             if call is not original_call:
                 self._validate_arguments(tool.spec.input_schema, call.arguments)
 
             started = perf_counter()
-            result = tool.execute({**call.arguments, "_call_id": call.id}, self.context)
+            result = tool.execute({**call.arguments, "_call_id": call.id}, tool_context)
             elapsed_ms = int((perf_counter() - started) * 1000)
             result = self._truncate_result(call, result)
-            return self._after_tool(tool, call, result, elapsed_ms)
+            normalized, terminate = self._after_tool(tool, call, result, elapsed_ms)
+            return normalized, terminate, updates
         except Exception as exc:
-            return self._error_result(call, exc), False
+            return self._error_result(call, exc), False, updates
+
+    @staticmethod
+    def _prepare_arguments(tool, arguments):
+        prepare = getattr(tool, "prepare_arguments", None)
+        if prepare is None:
+            return arguments
+        prepared = prepare(dict(arguments))
+        if not isinstance(prepared, dict):
+            raise TypeError("prepare_arguments must return an object")
+        return prepared
 
     def _invoke_hook(self, name: str, context: ToolHookContext) -> ToolHookDecision:
         if self.hooks is None:
@@ -190,7 +224,7 @@ class ToolExecutor:
         if not isinstance(result.content, str):
             return self._error_result(call, TypeError("ToolResult content must be a string"))
 
-        direction = "tail" if call.name == "exe" else "head"
+        direction = "tail" if call.name in {"bash", "powershell"} else "head"
         if direction == "tail":
             truncation = truncate_tail(
                 result.content,
@@ -253,3 +287,15 @@ class ToolExecutor:
                 raise ValueError(f"argument {name} must be an integer")
             if expected == "number" and (isinstance(value, bool) or not isinstance(value, (int, float))):
                 raise ValueError(f"argument {name} must be a number")
+            if isinstance(definition, dict):
+                if "enum" in definition and value not in definition["enum"]:
+                    raise ValueError(f"argument {name} must be one of: {', '.join(map(str, definition['enum']))}")
+                if isinstance(value, str) and "minLength" in definition and len(value) < definition["minLength"]:
+                    raise ValueError(f"argument {name} is too short")
+                if isinstance(value, (int, float)) and "minimum" in definition and value < definition["minimum"]:
+                    raise ValueError(f"argument {name} is below minimum")
+                if isinstance(value, (list, dict)) and "minItems" in definition and len(value) < definition["minItems"]:
+                    raise ValueError(f"argument {name} has too few items")
+                if expected == "array" and isinstance(definition.get("items"), dict):
+                    for item in value:
+                        ToolExecutor._validate_arguments(definition["items"], item)

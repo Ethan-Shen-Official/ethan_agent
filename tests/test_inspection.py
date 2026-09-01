@@ -5,14 +5,13 @@ from core.types import Message, ModelRequest, ToolSpec
 from harness.inspection import ContextInspector, InspectingProvider, format_context_snapshot
 from providers.base import FakeProvider
 from runtime.execution import LocalExecutionEnv
-from runtime.permissions import AllowAllPermissions
 from tools.base import ToolContext
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 
 
 def _loop(provider):
-    context = ToolContext(LocalExecutionEnv("."), AllowAllPermissions())
+    context = ToolContext(LocalExecutionEnv("."))
     return AgentLoop(
         provider,
         ToolExecutor(ToolRegistry(), context),

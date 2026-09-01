@@ -8,18 +8,38 @@ from core.types import ToolCall
 from harness.app import Harness
 from providers.base import FakeProvider
 from runtime.execution import LocalExecutionEnv
-from runtime.permissions import AllowAllPermissions
 from tools.base import ToolContext
 from tools.executor import ToolExecutor
-from tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, SearchTool, WriteFileTool
+from tools.filesystem import EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
 from tools.registry import ToolRegistry
-from tools.shell import ShellTool
+from tools.process import BashTool
 
 
 def make_loop(provider, cwd=".", max_turns=8):
-    registry = ToolRegistry([ReadFileTool(), WriteFileTool(), SearchTool(), ShellTool()])
-    context = ToolContext(LocalExecutionEnv(cwd), AllowAllPermissions())
+    registry = ToolRegistry([ReadTool(), WriteTool(), FindTool(), BashTool()])
+    context = ToolContext(LocalExecutionEnv(cwd))
     return AgentLoop(provider, ToolExecutor(registry, context), registry.specs(), LoopConfig(max_turns=max_turns))
+
+
+def test_canonical_registry_and_read_only_tool_guidance():
+    from harness.sdk import create_context_builder, create_default_registry
+
+    registry = create_default_registry()
+    assert [spec.name for spec in registry.specs()] == [
+        "read", "write", "edit", "ls", "find", "grep", "bash", "powershell"
+    ]
+    assert all(registry.get(name) is None for name in (
+        "read_file", "write_file", "edit_file", "list_dir", "search", "exe", "shell"
+    ))
+    descriptions = {spec.name: spec.description for spec in registry.specs()}
+    assert "Preferred read-only tool" in descriptions["ls"]
+    assert "only when a dedicated tool cannot express" in descriptions["bash"]
+
+    request = create_context_builder(LocalExecutionEnv("."), FakeProvider(["ok"])).build(
+        LoopState(), registry.specs(), "base"
+    )
+    assert "For directory inspection, use ls first." in request.system_prompt
+    assert "Do not use bash or powershell for ls/dir" in request.system_prompt
 
 
 def test_text_response_completes():
@@ -70,7 +90,7 @@ def test_invalid_tool_arguments_are_returned_as_error(tmp_path: Path):
 
 
 def test_max_turns_stops_tool_loop():
-    call = ToolCall("c1", "search", {"pattern": "*.py"})
+    call = ToolCall("c1", "find", {"pattern": "*.py"})
     events = list(make_loop(FakeProvider([[call], [call], [call]]), max_turns=2).run("loop"))
     assert events[-1].data["reason"] == "max_turns"
 
@@ -87,28 +107,31 @@ def test_begin_run_resets_cancel_state():
 
 def test_builtin_tools(tmp_path: Path):
     env = LocalExecutionEnv(tmp_path)
-    context = ToolContext(env, AllowAllPermissions())
-    assert WriteFileTool().execute({"path": "a.txt", "content": "abc"}, context).is_error is False
-    assert ReadFileTool().execute({"path": "a.txt"}, context).content == "abc"
-    assert SearchTool().execute({"pattern": "*.txt"}, context).content == "a.txt"
-    result = ShellTool().execute({"cmd": "echo ok"}, context)
+    context = ToolContext(env)
+    assert WriteTool().execute({"path": "a.txt", "content": "abc"}, context).is_error is False
+    assert ReadTool().execute({"path": "a.txt"}, context).content == "abc"
+    assert FindTool().execute({"pattern": "*.txt"}, context).content == "a.txt"
+    env.write_file("src/demo.py", "alpha\nneedle\nomega\n")
+    assert "src/demo.py:2:" in GrepTool().execute(
+        {"pattern": "needle", "path": "src"}, context
+    ).content
+    result = BashTool().execute({"command": "echo ok"}, context)
     assert result.is_error is False
     assert "ok" in result.content
 
 
 def test_edit_tool_requires_unique_match_and_updates_file(tmp_path: Path):
     env = LocalExecutionEnv(tmp_path)
-    context = ToolContext(env, AllowAllPermissions())
+    context = ToolContext(env)
     env.write_file("a.txt", "before\\nbefore\\n")
-    ambiguous = EditFileTool().execute(
-        {"path": "a.txt", "old_text": "before", "new_text": "after"}, context
+    ambiguous = EditTool().execute(
+        {"path": "a.txt", "edits": [{"oldText": "before", "newText": "after"}]}, context
     )
     assert ambiguous.is_error is True
-    replaced = EditFileTool().execute(
+    replaced = EditTool().execute(
         {
             "path": "a.txt",
-            "old_text": "before",
-            "new_text": "after",
+            "edits": [{"oldText": "before", "newText": "after"}],
             "replace_all": True,
         },
         context,
@@ -116,13 +139,24 @@ def test_edit_tool_requires_unique_match_and_updates_file(tmp_path: Path):
     assert replaced.is_error is False
     assert env.read_file("a.txt") == "after\\nafter\\n"
 
+    details_executor = ToolExecutor(ToolRegistry([EditTool()]), context)
+    events = list(details_executor.execute([ToolCall(
+        "edit-details", "edit", {
+            "path": "a.txt",
+            "edits": [{"oldText": "after", "newText": "updated"}],
+            "replace_all": True,
+        },
+    )]))
+    assert next(event.data["result"] for event in events if event.kind == "tool_result").is_error is False
+    assert details_executor.tool_details("edit-details")["diff"]
 
-def test_list_dir_tool_lists_nested_entries_and_hides_dotfiles(tmp_path: Path):
+
+def test_ls_tool_lists_nested_entries_and_hides_dotfiles(tmp_path: Path):
     env = LocalExecutionEnv(tmp_path)
-    context = ToolContext(env, AllowAllPermissions())
+    context = ToolContext(env)
     env.write_file("src/main.py", "print('ok')")
     env.write_file(".secret", "hidden")
-    result = ListDirTool().execute({"depth": 2}, context)
+    result = LsTool().execute({"depth": 2, "include_hidden": False}, context)
     assert result.is_error is False
     assert "src" + __import__("os").sep in result.content
     assert "src" + __import__("os").sep + "main.py" in result.content
@@ -130,10 +164,10 @@ def test_list_dir_tool_lists_nested_entries_and_hides_dotfiles(tmp_path: Path):
 
 
 def test_executor_rejects_wrong_argument_types(tmp_path: Path):
-    registry = ToolRegistry([ListDirTool()])
-    context = ToolContext(LocalExecutionEnv(tmp_path), AllowAllPermissions())
+    registry = ToolRegistry([LsTool()])
+    context = ToolContext(LocalExecutionEnv(tmp_path))
     executor = ToolExecutor(registry, context)
-    call = ToolCall("c1", "list_dir", {"depth": "two"})
+    call = ToolCall("c1", "ls", {"depth": "two"})
     events = list(executor.execute([call]))
     result = next(event.data["result"] for event in events if event.kind == "tool_result")
     assert result.is_error is True
@@ -191,8 +225,8 @@ def test_context_discovers_runtime_metadata_and_root_instructions(tmp_path: Path
 def test_before_tool_hook_can_block_without_running_tool(tmp_path: Path):
     from harness.hooks import ToolHookDecision, ToolLoopHooks
 
-    registry = ToolRegistry([WriteFileTool()])
-    context = ToolContext(LocalExecutionEnv(tmp_path), AllowAllPermissions())
+    registry = ToolRegistry([WriteTool()])
+    context = ToolContext(LocalExecutionEnv(tmp_path))
     hooks = ToolLoopHooks(
         before_tool=lambda ctx: ToolHookDecision(action="block", reason="policy blocked")
     )
@@ -207,8 +241,8 @@ def test_before_tool_hook_can_block_without_running_tool(tmp_path: Path):
 def test_before_tool_replacement_is_validated_and_used(tmp_path: Path):
     from harness.hooks import ToolHookDecision, ToolLoopHooks
 
-    registry = ToolRegistry([WriteFileTool()])
-    context = ToolContext(LocalExecutionEnv(tmp_path), AllowAllPermissions())
+    registry = ToolRegistry([WriteTool()])
+    context = ToolContext(LocalExecutionEnv(tmp_path))
     hooks = ToolLoopHooks(
         before_tool=lambda ctx: ToolHookDecision(
             action="replace_arguments",
@@ -251,8 +285,8 @@ def test_after_tool_can_transform_result_and_stop_loop(tmp_path: Path):
 def test_hook_result_cannot_change_tool_call_identity(tmp_path: Path):
     from harness.hooks import ToolHookDecision, ToolLoopHooks
 
-    registry = ToolRegistry([WriteFileTool()])
-    context = ToolContext(LocalExecutionEnv(tmp_path), AllowAllPermissions())
+    registry = ToolRegistry([WriteTool()])
+    context = ToolContext(LocalExecutionEnv(tmp_path))
     def rewrite(ctx):
         return ToolHookDecision(action="replace_result", result=type(ctx.result)("other", "other", "changed", False))
     executor = ToolExecutor(registry, context, ToolLoopHooks(after_tool=rewrite))

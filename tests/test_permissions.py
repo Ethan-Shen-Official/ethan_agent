@@ -11,9 +11,9 @@ from runtime.execution import LocalExecutionEnv
 from runtime.permissions import PermissionDecision, WorkspacePermissionPolicy
 from tools.base import ToolContext
 from tools.executor import ToolExecutor
-from tools.filesystem import ReadFileTool, WriteFileTool
+from tools.filesystem import ReadTool, WriteTool
 from tools.registry import ToolRegistry
-from tools.shell import ShellTool
+from tools.process import BashTool
 
 
 def _result(executor: ToolExecutor, call: ToolCall):
@@ -22,7 +22,7 @@ def _result(executor: ToolExecutor, call: ToolCall):
 
 def test_default_policy_allows_reads_and_asks_for_writes(tmp_path: Path):
     policy = WorkspacePermissionPolicy()
-    assert policy.check("read_file", {"path": "a.txt"}).behavior == "allow"
+    assert policy.check("read", {"path": "a.txt"}).behavior == "allow"
     assert policy.check("write", {"path": "a.txt", "content": "x"}).behavior == "ask"
 
 
@@ -39,12 +39,12 @@ def test_policy_exposes_only_three_modes():
 
 
 def test_before_pipeline_denies_ask_without_approval(tmp_path: Path):
-    registry = ToolRegistry([WriteFileTool()])
+    registry = ToolRegistry([WriteTool()])
     hooks = ToolLoopHooks(
         permission_manager=WorkspacePermissionPolicy(),
         approval_handler=lambda request: False,
     )
-    executor = ToolExecutor(registry, ToolContext(LocalExecutionEnv(tmp_path), None), hooks)
+    executor = ToolExecutor(registry, ToolContext(LocalExecutionEnv(tmp_path)), hooks)
 
     result = _result(executor, ToolCall("call", "write", {"path": "blocked.txt", "content": "no"}))
 
@@ -54,12 +54,12 @@ def test_before_pipeline_denies_ask_without_approval(tmp_path: Path):
 
 
 def test_before_pipeline_allows_after_approval(tmp_path: Path):
-    registry = ToolRegistry([WriteFileTool()])
+    registry = ToolRegistry([WriteTool()])
     hooks = ToolLoopHooks(
         permission_manager=WorkspacePermissionPolicy(),
         approval_handler=lambda request: True,
     )
-    executor = ToolExecutor(registry, ToolContext(LocalExecutionEnv(tmp_path), None), hooks)
+    executor = ToolExecutor(registry, ToolContext(LocalExecutionEnv(tmp_path)), hooks)
 
     result = _result(executor, ToolCall("call", "write", {"path": "allowed.txt", "content": "yes"}))
 
@@ -75,9 +75,9 @@ def test_protected_metadata_is_denied_even_in_bypass_mode(tmp_path: Path):
 
 def test_shell_commands_cannot_remove_protected_metadata():
     policy = WorkspacePermissionPolicy("bypass_permissions")
-    decision = policy.check("exe", {"cmd": "rmdir /s /q .agent .git"})
+    decision = policy.check("bash", {"command": "rmdir /s /q .agent .git"})
     assert decision == PermissionDecision("deny", decision.reason, "protected-path")
-    assert policy.check("exe", {"cmd": "del .gitignore"}).behavior == "allow"
+    assert policy.check("bash", {"command": "del .gitignore"}).behavior == "allow"
 
 
 def test_workspace_wide_delete_blacklist_applies_to_every_mode():
@@ -93,7 +93,7 @@ def test_workspace_wide_delete_blacklist_applies_to_every_mode():
     for mode in ("default", "accept_edits", "bypass_permissions"):
         policy = WorkspacePermissionPolicy(mode)
         for command in commands:
-            decision = policy.check("exe", {"cmd": command})
+            decision = policy.check("bash", {"command": command})
             assert decision.behavior == "deny", (mode, command, decision)
             assert decision.rule == "destructive-command"
 
@@ -104,7 +104,7 @@ def test_batch_loop_delete_blacklist_covers_dynamic_targets():
         "\"%i\\\\.\" (rmdir /s /q \"%i\") else (del /a /f /q \"%i\")"
     )
     for mode in ("default", "accept_edits", "bypass_permissions"):
-        decision = WorkspacePermissionPolicy(mode).check("exe", {"cmd": command})
+        decision = WorkspacePermissionPolicy(mode).check("bash", {"command": command})
         assert decision.behavior == "deny"
         assert decision.rule == "destructive-command"
 
@@ -124,14 +124,14 @@ def test_execution_boundary_blocks_metadata_and_batch_deletes(tmp_path: Path):
 
 
 def test_shell_tool_cannot_bypass_metadata_guard_with_allow_all(tmp_path: Path):
-    context = ToolContext(LocalExecutionEnv(tmp_path), AllowAllPermissions())
-    result = ShellTool().execute({"cmd": "rmdir /s /q .agent"}, context)
+    context = ToolContext(LocalExecutionEnv(tmp_path))
+    result = BashTool().execute({"command": "rmdir /s /q .agent"}, context)
     assert result.is_error is True
     assert "protected workspace metadata" in result.content
 
 
 def test_custom_argument_replacement_is_checked_by_policy(tmp_path: Path):
-    registry = ToolRegistry([WriteFileTool()])
+    registry = ToolRegistry([WriteTool()])
     hooks = ToolLoopHooks(
         before_tool=lambda context: ToolHookDecision(
             action="replace_arguments",
@@ -140,7 +140,7 @@ def test_custom_argument_replacement_is_checked_by_policy(tmp_path: Path):
         permission_manager=WorkspacePermissionPolicy("bypass_permissions"),
         approval_handler=lambda request: True,
     )
-    executor = ToolExecutor(registry, ToolContext(LocalExecutionEnv(tmp_path), None), hooks)
+    executor = ToolExecutor(registry, ToolContext(LocalExecutionEnv(tmp_path)), hooks)
 
     result = _result(executor, ToolCall("call", "write", {"path": "safe.txt", "content": "original"}))
 
@@ -153,10 +153,10 @@ def test_permission_policy_can_be_customized_without_executor_changes(tmp_path: 
         def check(self, tool_name, arguments):
             return PermissionDecision("deny", "read policy")
 
-    registry = ToolRegistry([ReadFileTool()])
+    registry = ToolRegistry([ReadTool()])
     hooks = ToolLoopHooks(permission_manager=DenyReads())
-    executor = ToolExecutor(registry, ToolContext(LocalExecutionEnv(tmp_path), None), hooks)
-    result = _result(executor, ToolCall("call", "read_file", {"path": "missing.txt"}))
+    executor = ToolExecutor(registry, ToolContext(LocalExecutionEnv(tmp_path)), hooks)
+    result = _result(executor, ToolCall("call", "read", {"path": "missing.txt"}))
 
     assert result.is_error is True
     assert "read policy" in result.content

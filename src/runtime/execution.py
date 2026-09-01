@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from .permissions import is_destructive_shell_command, is_protected_shell_command
 
@@ -21,22 +22,17 @@ class ExecutionEnv:
     def write_file(self, path: str, content: str) -> None:
         raise NotImplementedError
 
-    def edit_file(
-        self, path: str, old_text: str, new_text: str, replace_all: bool = False
-    ) -> int:
-        raise NotImplementedError
-
     def list_dir(
         self,
         path: str = ".",
         depth: int = 1,
-        max_entries: int = 200,
+        limit: int = 200,
         include_hidden: bool = False,
     ) -> list[str]:
         raise NotImplementedError
 
     def search(
-        self, pattern: str, max_results: int = 200, include_hidden: bool = False
+        self, pattern: str, limit: int = 200, include_hidden: bool = False
     ) -> list[str]:
         raise NotImplementedError
 
@@ -44,6 +40,8 @@ class ExecutionEnv:
         self,
         command: str,
         cancel_event: threading.Event | None = None,
+        timeout: float | None = None,
+        on_output: Callable[[dict[str, str]], None] | None = None,
     ) -> tuple[int, str, str]:
         raise NotImplementedError
 
@@ -78,37 +76,17 @@ class LocalExecutionEnv(ExecutionEnv):
         target.parent.mkdir(parents=True, exist_ok=True)
         self._atomic_write_text(target, content)
 
-    def edit_file(
-        self, path: str, old_text: str, new_text: str, replace_all: bool = False
-    ) -> int:
-        if not old_text:
-            raise ValueError("old_text must not be empty")
-        target = self._path(path)
-        self._assert_mutable_path(target)
-        content = target.read_text(encoding="utf-8")
-        matches = content.count(old_text)
-        if matches == 0:
-            raise ValueError(f"text not found in {path}")
-        if matches > 1 and not replace_all:
-            raise ValueError(
-                f"old_text matched {matches} locations in {path}; "
-                "provide a unique snippet or set replace_all=true"
-            )
-        updated = content.replace(old_text, new_text, -1 if replace_all else 1)
-        self._atomic_write_text(target, updated)
-        return matches if replace_all else 1
-
     def list_dir(
         self,
         path: str = ".",
         depth: int = 1,
-        max_entries: int = 200,
+        limit: int = 200,
         include_hidden: bool = False,
     ) -> list[str]:
         if depth < 1:
             raise ValueError("depth must be at least 1")
-        if max_entries < 1:
-            raise ValueError("max_entries must be at least 1")
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
         root = self._path(path)
         if not root.is_dir():
             raise NotADirectoryError(path)
@@ -116,14 +94,14 @@ class LocalExecutionEnv(ExecutionEnv):
         results: list[str] = []
 
         def visit(directory: Path, level: int) -> None:
-            if len(results) >= max_entries:
+            if len(results) >= limit:
                 return
             try:
                 entries = sorted(directory.iterdir(), key=lambda item: item.name.lower())
             except OSError:
                 return
             for entry in entries:
-                if len(results) >= max_entries:
+                if len(results) >= limit:
                     return
                 if not include_hidden and entry.name.startswith("."):
                     continue
@@ -139,10 +117,10 @@ class LocalExecutionEnv(ExecutionEnv):
         return results
 
     def search(
-        self, pattern: str, max_results: int = 200, include_hidden: bool = False
+        self, pattern: str, limit: int = 200, include_hidden: bool = False
     ) -> list[str]:
-        if max_results < 1:
-            raise ValueError("max_results must be at least 1")
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
         results: list[str] = []
         for path in sorted(self.cwd.rglob(pattern), key=lambda item: str(item).lower()):
             if path.is_symlink():
@@ -151,7 +129,7 @@ class LocalExecutionEnv(ExecutionEnv):
             if not include_hidden and any(part.startswith(".") for part in relative.parts):
                 continue
             results.append(str(relative))
-            if len(results) >= max_results:
+            if len(results) >= limit:
                 break
         return results
 
@@ -190,10 +168,11 @@ class LocalExecutionEnv(ExecutionEnv):
         self,
         command: str,
         cancel_event: threading.Event | None = None,
+        timeout: float | None = None,
+        on_output: Callable[[dict[str, str]], None] | None = None,
     ) -> tuple[int, str, str]:
-        # This check is deliberately below the permission-policy layer.  It
-        # protects direct/compatibility callers that use AllowAllPermissions,
-        # and catches the same batch-loop patterns before ``cmd.exe`` starts.
+        # This check is deliberately below the permission-policy layer. It is
+        # the final capability boundary before the process starts.
         if is_destructive_shell_command(command):
             raise PermissionError("destructive workspace-wide command is blocked")
         if is_protected_shell_command(command):
@@ -215,8 +194,46 @@ class LocalExecutionEnv(ExecutionEnv):
             stderr=subprocess.PIPE,
             creationflags=creationflags,
         )
-        deadline = time.monotonic() + self.command_timeout
+        effective_timeout = self.command_timeout if timeout is None else float(timeout)
+        if effective_timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
+        deadline = time.monotonic() + effective_timeout
         cancelled = False
+
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+
+        def append_bounded(target: list[str], chunk: str) -> None:
+            target.append(chunk)
+            # Keep a small rolling tail so an unbounded command cannot consume
+            # process memory before ToolExecutor applies its own limits.
+            if sum(len(part.encode("utf-8", errors="replace")) for part in target) > self.max_output_bytes * 2:
+                encoded = "".join(target).encode("utf-8", errors="replace")[-self.max_output_bytes * 2 :]
+                target[:] = [encoded.decode("utf-8", errors="replace")]
+
+        def pump(stream, target: list[str], name: str) -> None:
+            if stream is None:
+                return
+            try:
+                for chunk in iter(lambda: stream.read(4096), ""):
+                    if not chunk:
+                        break
+                    append_bounded(target, chunk)
+                    if on_output is not None:
+                        try:
+                            on_output({"stream": name, "text": chunk})
+                        except Exception:
+                            # Rendering callbacks must never break a process.
+                            pass
+            except (OSError, ValueError):
+                return
+
+        readers = [
+            threading.Thread(target=pump, args=(process.stdout, stdout_parts, "stdout"), daemon=True),
+            threading.Thread(target=pump, args=(process.stderr, stderr_parts, "stderr"), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
         while process.poll() is None:
             if cancel_event is not None and cancel_event.is_set():
                 cancelled = True
@@ -224,21 +241,24 @@ class LocalExecutionEnv(ExecutionEnv):
                 break
             if time.monotonic() >= deadline:
                 self._terminate_process(process)
-                stdout, stderr = self._communicate_after_stop(process)
-                stderr = f"command timed out after {self.command_timeout:g}s\n{stderr or ''}"
-                return 124, stdout or "", stderr
+                for reader in readers:
+                    reader.join(timeout=0.5)
+                stderr = f"command timed out after {effective_timeout:g}s\n{''.join(stderr_parts)}"
+                return 124, self._limit_output("".join(stdout_parts), from_end=True), self._limit_output(stderr, from_end=True)
             try:
                 process.wait(timeout=0.05)
             except subprocess.TimeoutExpired:
                 continue
-        stdout, stderr = self._communicate_after_stop(process) if cancelled else process.communicate()
+        for reader in readers:
+            reader.join(timeout=0.5)
+        stdout, stderr = "".join(stdout_parts), "".join(stderr_parts)
         if cancelled:
             stderr = f"command cancelled\n{stderr or ''}"
-            return 130, stdout or "", stderr
+            return 130, self._limit_output(stdout or "", from_end=True), self._limit_output(stderr, from_end=True)
         # Preserve the end of process output so ToolExecutor can apply its
         # user-facing tail truncation without losing the final diagnostics.
         return (
-            process.returncode,
+            process.returncode if process.returncode is not None else 1,
             self._limit_output(stdout or "", from_end=True),
             self._limit_output(stderr or "", from_end=True),
         )

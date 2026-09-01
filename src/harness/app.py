@@ -166,6 +166,9 @@ class Harness:
     def context_snapshot(self) -> ContextSnapshot | None:
         return self.agent.context_snapshot()
 
+    def tool_details(self, call_id: str) -> dict[str, object] | None:
+        return self.agent.tool_details(call_id)
+
     def compact(self, *, force: bool = True) -> CompactionResult | None:
         return self.agent.compact(force=force)
 

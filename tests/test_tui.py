@@ -6,6 +6,7 @@ from cli.ui.renderer import ScreenRenderer
 from cli.ui.state import TranscriptItem, ToolView, UiState
 from cli.ui.terminal import TerminalBackend
 from cli.ui.markdown import render_markdown
+from cli.ui.tool_render import edit_diff_lines
 from cli.ui.app import TuiApplication
 from cli.repl import ApprovalBroker
 from core.types import AgentEvent
@@ -85,7 +86,7 @@ def test_renderer_keeps_all_runtime_command_output_blocks():
 def test_reducer_tracks_tool_as_transient_operation():
     state = UiState()
     reduce_event(state, AgentEvent("request_start", {"turn": 2}))
-    reduce_event(state, AgentEvent("tool_start", {"id": "c1", "name": "search", "arguments": {}}))
+    reduce_event(state, AgentEvent("tool_start", {"id": "c1", "name": "find", "arguments": {}}))
     assert state.mode == "working"
     assert state.active_tool is not None
     reduce_event(state, AgentEvent("tool_result", {"result": object()}))
@@ -93,7 +94,7 @@ def test_reducer_tracks_tool_as_transient_operation():
     assert state.transcript == []
     from core.types import ToolResult
 
-    reduce_event(state, AgentEvent("tool_result", {"result": ToolResult("c1", "search", "result text")}))
+    reduce_event(state, AgentEvent("tool_result", {"result": ToolResult("c1", "find", "result text")}))
     assert [(item.kind, item.text) for item in state.transcript] == [("tool", "result text")]
 
 
@@ -224,8 +225,8 @@ def test_tui_restores_tool_history_in_collapsed_form():
         state = LoopState(
             messages=[
                 Message.user("inspect the file"),
-                Message.assistant(tool_calls=[ToolCall("c1", "read_file", {"path": "large.txt"})]),
-                Message.tool(ToolResult("c1", "read_file", "\n".join(f"line {i}" for i in range(30)))),
+                Message.assistant(tool_calls=[ToolCall("c1", "read", {"path": "large.txt"})]),
+                Message.tool(ToolResult("c1", "read", "\n".join(f"line {i}" for i in range(30)))),
             ]
         )
 
@@ -238,7 +239,7 @@ def test_tui_restores_tool_history_in_collapsed_form():
     tool = app.state.transcript[-1]
     assert tool.kind == "tool"
     assert tool.collapsed is True
-    assert tool.tool_name == "read_file"
+    assert tool.tool_name == "read"
     assert tool.tool_arguments == {"path": "large.txt"}
     assert tool.tool_error is False
 
@@ -316,7 +317,7 @@ def test_tool_output_is_collapsed_and_expands_with_ctrl_o():
             "tool",
             "\n".join(f"line {index}" for index in range(30)),
             collapsed=True,
-            tool_name="read_file",
+            tool_name="read",
             tool_arguments={"path": "large.txt"},
         )
     ]
@@ -325,7 +326,7 @@ def test_tool_output_is_collapsed_and_expands_with_ctrl_o():
     collapsed_text = "\n".join(collapsed)
     assert "line 29" not in collapsed_text
     assert "lines hidden" in collapsed_text
-    assert "read_file large.txt" in collapsed_text
+    assert "read large.txt" in collapsed_text
     state.tools_expanded = True
     expanded, _ = renderer._lines(state)
     assert "line 29" in "\n".join(expanded)
@@ -362,11 +363,20 @@ def test_large_write_tool_call_renders_summary_not_file_content():
     assert "x\nx" not in text
 
 
-def test_list_dir_running_summary_does_not_dump_partial_json():
+def test_edit_diff_preview_renders_canonical_edit_list():
+    lines, omitted = edit_diff_lines(
+        {"edits": [{"oldText": "old line", "newText": "new line"}]}
+    )
+    assert omitted == 0
+    assert any(line.startswith("- ") and "old line" in line for line in lines)
+    assert any(line.startswith("+ ") and "new line" in line for line in lines)
+
+
+def test_ls_running_summary_does_not_dump_partial_json():
     terminal = _FakeTerminal()
-    state = UiState(cwd="D:/workspace", active_tool=ToolView("list_dir", {"path": ".", "depth": 2}))
+    state = UiState(cwd="D:/workspace", active_tool=ToolView("ls", {"path": ".", "depth": 2}))
     text = "\n".join(ScreenRenderer(terminal)._lines(state)[0])
-    assert "running list_dir . (depth=2)" in text
+    assert "running ls . (depth=2)" in text
     assert '{"path"' not in text
 
 
@@ -378,12 +388,12 @@ def test_completed_read_result_keeps_compact_file_header():
             "tool",
             "\n".join(f"line {index}" for index in range(30)),
             collapsed=True,
-            tool_name="read_file",
+            tool_name="read",
             tool_arguments={"path": "src/main.py"},
         )
     ]
     text = "\n".join(ScreenRenderer(terminal)._lines(state)[0])
-    assert "read_file src/main.py" in text
+    assert "read src/main.py" in text
     assert "line 29" not in text
 
 
@@ -515,7 +525,7 @@ def test_permission_state_renders_visible_approval_panel():
     state = UiState(mode="permission", status="waiting for approval", input_text="")
     from cli.ui.state import ToolView
 
-    state.active_tool = ToolView("exe", {"cmd": "echo test"})
+    state.active_tool = ToolView("bash", {"command": "echo test"})
     ScreenRenderer(terminal).render(state)
     output = terminal.output.getvalue()
     assert "permission required" in output
@@ -545,7 +555,7 @@ def test_user_and_tool_blocks_share_horizontal_padding():
     state = UiState(
         transcript=[
             TranscriptItem("user", "question"),
-            TranscriptItem("tool", "result", tool_name="exe", tool_arguments={"cmd": "echo ok"}),
+            TranscriptItem("tool", "result", tool_name="bash", tool_arguments={"command": "echo ok"}),
         ]
     )
     lines, _ = ScreenRenderer(terminal)._lines(state)
@@ -584,7 +594,7 @@ def test_tui_permission_request_can_be_answered_without_deadlock():
 
     broker = ApprovalBroker()
     harness = Harness(
-        FakeProvider([[ToolCall("c1", "exe", {"cmd": "echo test"})], "done"]),
+        FakeProvider([[ToolCall("c1", "bash", {"command": "echo test"})], "done"]),
         "workspace",
         approval_handler=create_approval_handler(broker),
     )

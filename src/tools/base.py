@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import threading
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from core.errors import format_tool_error
 from core.types import ToolResult, ToolSpec
@@ -11,16 +11,13 @@ from core.types import ToolResult, ToolSpec
 
 @dataclass(frozen=True)
 class ToolContext:
-    """Execution dependencies supplied by the harness.
-
-    ``permission_manager`` is retained as an optional compatibility field for
-    low-level embedders. Permission decisions are made by ``ToolLoopHooks``
-    before a tool runs; built-in tools must not call this field themselves.
-    """
+    """Execution dependencies supplied by the harness."""
 
     execution_env: Any
-    permission_manager: Any = None
     cancel_event: threading.Event | None = None
+    call_id: str = ""
+    on_update: Callable[[dict[str, Any]], None] | None = None
+    details_store: Any = None
 
 
 class Tool(Protocol):
@@ -48,7 +45,12 @@ class ToolBase(ABC):
             key: value for key, value in arguments.items() if key != "_call_id"
         }
         try:
-            result = self.run(implementation_args, context)
+            prepare = getattr(self, "prepare_arguments", None)
+            if prepare is not None:
+                implementation_args = prepare(dict(implementation_args))
+                if not isinstance(implementation_args, dict):
+                    raise TypeError("prepare_arguments must return an object")
+            result = self.run(implementation_args, replace(context, call_id=call_id))
         except Exception as exc:
             return ToolResult(call_id, self.spec.name, format_tool_error(exc), True)
         if isinstance(result, ToolResult):

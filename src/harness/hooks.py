@@ -97,7 +97,10 @@ class ToolLoopHooks:
         )
         if approved:
             return ToolHookDecision()
-        return ToolHookDecision(action="block", reason="permission denied by user")
+        return ToolHookDecision(
+            action="block",
+            reason=decision.reason or "permission denied by user",
+        )
 
     def after(self, context: ToolHookContext) -> ToolHookDecision:
         if context.phase != "after_tool":

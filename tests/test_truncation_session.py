@@ -1,9 +1,10 @@
 from pathlib import Path
 
+import pytest
+
 from core.types import Message, ToolCall, ToolResult, ToolSpec
 from providers.base import FakeProvider
 from runtime.execution import LocalExecutionEnv
-from runtime.permissions import AllowAllPermissions
 from core.errors import SessionError
 from runtime.session import JsonlSessionStore, default_session_path, latest_session_path
 from tools.base import ToolBase, ToolContext
@@ -13,7 +14,7 @@ from tools.truncate import truncate_head, truncate_tail
 
 
 def _context(tmp_path: Path) -> ToolContext:
-    return ToolContext(LocalExecutionEnv(tmp_path), AllowAllPermissions())
+    return ToolContext(LocalExecutionEnv(tmp_path))
 
 
 def test_head_truncation_keeps_complete_lines_and_metadata():
@@ -48,10 +49,10 @@ class _LongOutputTool(ToolBase):
         return self.content
 
 
-def test_executor_uses_tail_for_exe_and_head_for_other_tools(tmp_path: Path):
+def test_executor_uses_tail_for_shell_and_head_for_other_tools(tmp_path: Path):
     output = "\n".join(f"line-{i}" for i in range(5))
     registry = ToolRegistry(
-        [_LongOutputTool("read_file", output), _LongOutputTool("exe", output)]
+        [_LongOutputTool("read", output), _LongOutputTool("bash", output)]
     )
     executor = ToolExecutor(
         registry,
@@ -62,17 +63,17 @@ def test_executor_uses_tail_for_exe_and_head_for_other_tools(tmp_path: Path):
         event.data["result"].name: event.data["result"]
         for event in executor.execute(
             [
-                ToolCall("head", "read_file", {}),
-                ToolCall("tail", "exe", {}),
+                ToolCall("head", "read", {}),
+                ToolCall("tail", "bash", {}),
             ]
         )
         if event.kind == "tool_result"
     }
-    assert results["read_file"].content.startswith("line-0\nline-1")
-    assert results["exe"].content.startswith("line-3\nline-4")
-    assert results["read_file"].truncated is True
-    assert results["exe"].truncated is True
-    assert "[Output truncated:" in results["exe"].content
+    assert results["read"].content.startswith("line-0\nline-1")
+    assert results["bash"].content.startswith("line-3\nline-4")
+    assert results["read"].truncated is True
+    assert results["bash"].truncated is True
+    assert "[Output truncated:" in results["bash"].content
 
 
 def test_jsonl_session_store_round_trips_messages_and_tool_metadata(tmp_path: Path):
@@ -80,7 +81,7 @@ def test_jsonl_session_store_round_trips_messages_and_tool_metadata(tmp_path: Pa
     store = JsonlSessionStore(path, session_id="session-1", operation_id="op-1")
     result = ToolResult(
         "call-1",
-        "exe",
+        "bash",
         "tail",
         True,
         True,
@@ -92,7 +93,7 @@ def test_jsonl_session_store_round_trips_messages_and_tool_metadata(tmp_path: Pa
     )
     messages = [
         Message.user("run"),
-        Message.assistant("", [ToolCall("call-1", "exe", {"cmd": "echo ok"})]),
+        Message.assistant("", [ToolCall("call-1", "bash", {"command": "echo ok"})]),
         Message.tool(result),
     ]
     for message in messages:

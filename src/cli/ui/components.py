@@ -260,31 +260,31 @@ class TranscriptComponent:
     def _tool_call_summary(tool: ToolView, renderer) -> str:
         args = tool.arguments if isinstance(tool.arguments, dict) else {}
         name = tool.name
-        path = args.get("path", args.get("file_path", ""))
-        if name in {"write", "write_file"} and isinstance(args.get("content"), str):
+        path = args.get("path", "")
+        if name == "write" and isinstance(args.get("content"), str):
             content = args["content"]
             lines = len(content.splitlines())
             size = len(content.encode("utf-8"))
             return f"  ◌ running {name} {path} ({lines} lines, {size} bytes)"
-        if name in {"read", "read_file"} and path:
+        if name == "read" and path:
             suffix = ""
-            if args.get("offset") is not None or args.get("max_chars") is not None or args.get("limit") is not None:
-                suffix = f" offset={args.get('offset', 1)} limit={args.get('limit', args.get('max_chars', ''))}"
+            if args.get("offset") is not None or args.get("limit") is not None:
+                suffix = f" offset={args.get('offset', 1)} limit={args.get('limit', '')}"
             return f"  ◌ running {name} {path}{suffix}"
-        if name in {"edit", "edit_file"} and path:
+        if name == "edit" and path:
             edits = args.get("edits")
             count = len(edits) if isinstance(edits, list) else 1
             return f"  ◌ running {name} {path} ({count} edit(s))"
-        if name in {"list_dir", "list", "ls"}:
+        if name == "ls":
             target = path or "."
             depth = args.get("depth")
             suffix = f" (depth={depth})" if depth is not None else ""
             return f"  ◌ running {name} {target}{suffix}"
-        if name in {"search", "grep", "find"}:
-            pattern = args.get("pattern", args.get("query", args.get("cmd", "")))
+        if name in {"grep", "find"}:
+            pattern = args.get("pattern", "")
             return f"  ◌ running {name} {str(pattern)}" if pattern else f"  ◌ running {name}"
-        if name in {"exe", "shell", "bash", "powershell"}:
-            command = str(args.get("cmd", args.get("command", "")))
+        if name in {"bash", "powershell"}:
+            command = str(args.get("command", ""))
             return f"  ◌ running {name}: {command}" if command else f"  ◌ running {name}"
         return f"  ◌ running {name}{renderer._arguments(tool.arguments)}"
 
@@ -297,7 +297,7 @@ class TranscriptComponent:
         # Edit results are intentionally projected from arguments rather than
         # changing the runtime ToolResult shape.  This mirrors Pi's diff
         # component while preserving the complete plain result for the model.
-        if item.tool_name in {"edit", "edit_file"} and not item.tool_error:
+        if item.tool_name == "edit" and not item.tool_error:
             diff, omitted = edit_diff_lines(item.tool_arguments, max_lines=24)
             if diff:
                 all_lines = diff
@@ -308,7 +308,7 @@ class TranscriptComponent:
 
         # Pi hides successful read output by default because it is usually
         # only context for the model. Other tools keep a short preview.
-        hide_success = item.tool_name in {"read", "read_file"} and not item.tool_error
+        hide_success = item.tool_name == "read" and not item.tool_error
         shown = [] if hide_success else all_lines[:10]
         remaining = len(all_lines) if hide_success else max(0, len(all_lines) - len(shown))
         if header:
@@ -322,7 +322,7 @@ class TranscriptComponent:
     def _tool_bg(item: TranscriptItem) -> str:
         if item.tool_error:
             return "48;2;60;40;40"
-        if item.tool_name in {"edit", "edit_file"}:
+        if item.tool_name == "edit":
             return "48;2;40;50;40"
         return "48;2;40;50;40"
 

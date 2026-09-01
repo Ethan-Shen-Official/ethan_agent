@@ -75,12 +75,19 @@ Loop 按以下五个阶段运行：
 
 ## 内置工具
 
-- read_file：读取工作区内的 UTF-8 文本文件。
-- write：创建或覆盖文件。
-- edit：替换文件中的精确文本片段。
-- list_dir：列出工作区目录。
-- search：按 glob 搜索工作区路径。
-- exe：在固定工作目录执行 Shell 命令。
+工具采用 Pi 风格的 canonical 名称：
+
+- `read`：按行读取工作区内的 UTF-8 文本，支持 `offset`/`limit` 和续读提示。
+- `write`：在工作区内创建或原子覆盖 UTF-8 文件。
+- `edit`：对文件执行一个或多个精确替换，并记录 Diff/Patch 详情。
+- `ls`：列出目录内容，支持深度、隐藏文件和结果上限。
+- `find`：按 glob 搜索工作区路径，支持结果上限。
+- `grep`：按正则或字面量搜索文件内容，支持 glob、大小写、上下文和匹配上限。
+- `bash`：在固定工作目录执行 Shell 命令，支持 timeout、取消和增量输出。
+- `powershell`：在固定工作目录执行 PowerShell 命令。
+
+Registry 只暴露 canonical 工具名，不再解析历史工具别名。
+`edit` 只接受 `edits[{oldText,newText}]`，Shell 工具只接受 `command`。
 
 权限策略由 Harness 装配到 before_tool 预执行链：默认允许读取，写入、编辑和 Shell 命令需要确认；`--permission-mode` 可选择 `default`、`accept_edits` 或 `bypass_permissions`。路径校验和工作区边界仍由 ExecutionEnv 负责，不能被权限模式绕过；包含 `.agent` 或 `.git` 元数据路径的文件操作和 Shell 命令始终被拒绝。ExecutionEnv 还会再次执行这一安全检查，因此直接使用 `AllowAllPermissions` 或绕过 Harness 的调用也不能修改这些目录。递归删除工作区根目录、全量通配符删除、批处理 `for` 动态删除循环、`find . -delete` 和 `git clean -f` 等命令属于不可逆操作，在所有模式下直接拒绝。命令文本检查无法替代操作系统 ACL 或容器隔离，对编码、外部脚本和系统漏洞只能提供尽力而为的防护。
 
@@ -88,8 +95,8 @@ Loop 按以下五个阶段运行：
 
 ToolExecutor 统一限制工具结果，默认上限为 2,000 行或 50 KiB，先达到的限制生效：
 
-- read_file、search、list_dir 使用 head 截断，保留开头。
-- exe 使用 tail 截断，保留末尾错误和最终输出。
+- read、find、grep、ls 使用 head 截断，保留开头。
+- bash、powershell 使用 tail 截断，保留末尾错误和最终输出。
 - 截断按 UTF-8 字节边界处理，不返回超过限制的半个字符。
 - ToolResult 记录 truncated、truncated_by、总量和输出量等元数据。
 - 返回内容附带截断提示，模型可以通过更窄的查询继续读取遗漏部分。
@@ -122,7 +129,7 @@ Harness 启动时从 JsonlSessionStore 恢复当前活动分支；运行过程�
 
 - src/core：消息、Loop、上下文、状态和错误。
 - src/tools：工具契约、注册表、执行器、内置工具和截断器。
-- src/runtime：ExecutionEnv、权限和运行时策略；`runtime/session/` 内按 `types.py`（契约）、`paths.py`（路径）、`codec.py`（编解码）、`tree.py`（分支树）和 `store.py`（JSONL 存储）拆分，`runtime.session` 保留兼容导出。
+- src/runtime：ExecutionEnv、权限和运行时策略；`runtime/session/` 内按 `types.py`（契约）、`paths.py`（路径）、`codec.py`（编解码）、`tree.py`（分支树）和 `store.py`（JSONL 存储）拆分。
 - src/harness：长生命周期入口和工具 Hook 装配。
 - src/providers：模型协议适配。
 - src/cli：命令行入口和事件渲染。

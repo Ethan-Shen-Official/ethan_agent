@@ -153,6 +153,10 @@ class AgentSession:
         """Return the latest exact provider request for read-only diagnostics."""
         return self.context_inspector.snapshot()
 
+    def tool_details(self, call_id: str) -> dict[str, object] | None:
+        """Return transient rich details for a tool call (Diff/output path)."""
+        return self.tool_executor.tool_details(call_id)
+
     def compact(self, *, force: bool = True) -> CompactionResult | None:
         """Summarize old transcript entries and persist a branch-local marker."""
         result = self.compaction.compact(force=force)

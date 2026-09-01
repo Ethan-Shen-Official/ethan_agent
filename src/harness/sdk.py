@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from core.context import DefaultContextBuilder
 from core.loop import AgentLoop, LoopConfig
 from runtime.execution import LocalExecutionEnv
@@ -12,23 +14,56 @@ from runtime.permissions import (
     WorkspacePermissionPolicy,
 )
 from tools.base import ToolContext
+from tools.details import ToolDetailsStore
 from tools.executor import ToolExecutor, ToolOutputLimits
-from tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, SearchTool, WriteFileTool
+from tools.filesystem import EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
 from tools.registry import ToolRegistry
-from tools.shell import ShellTool
+from tools.process import BashTool, PowerShellTool
 
 from .hooks import ToolLoopHooks
+
+
+TOOL_SELECTION_GUIDANCE = """Tool selection rules:
+- For directory inspection, use ls first.
+- For locating files or directories by name or glob, use find.
+- For searching file contents, use grep.
+- For reading a known file, use read (use offset/limit for large files).
+- Use bash or powershell only when the dedicated read/write/edit tools cannot express the task.
+- Do not use bash or powershell for ls/dir, find, grep/rg, cat/type, or equivalent read-only tasks.
+- read, ls, find, and grep are read-only and do not require permission; write, edit, bash, and powershell may require permission.
+"""
+
+
+class ToolSelectionContextBuilder:
+    """Append tool-choice guidance without changing the core context contract."""
+
+    def __init__(self, base: DefaultContextBuilder) -> None:
+        self.base = base
+
+    def __getattr__(self, name):
+        # Preserve the useful inspection attributes of DefaultContextBuilder
+        # for embedders while keeping the guidance outside core/context.py.
+        return getattr(self.base, name)
+
+    def build(self, state, tools, system_prompt):
+        request = self.base.build(state, tools, system_prompt)
+        return replace(
+            request,
+            system_prompt=f"{request.system_prompt}\n\n{TOOL_SELECTION_GUIDANCE.strip()}",
+        )
 
 
 def create_default_registry() -> ToolRegistry:
     return ToolRegistry(
         [
-            ReadFileTool(),
-            WriteFileTool(),
-            EditFileTool(),
-            ListDirTool(),
-            SearchTool(),
-            ShellTool(),
+            ReadTool(),
+            WriteTool(),
+            EditTool(),
+            LsTool(),
+            FindTool(),
+            GrepTool(),
+            BashTool(),
+            PowerShellTool(),
         ]
     )
 
@@ -60,16 +95,18 @@ def create_tool_executor(
 ) -> ToolExecutor:
     return ToolExecutor(
         registry,
-        ToolContext(execution_env),
+        ToolContext(execution_env, details_store=ToolDetailsStore()),
         hooks,
         output_limits=output_limits,
     )
 
 
 def create_context_builder(execution_env: LocalExecutionEnv, provider):
-    return DefaultContextBuilder(
-        str(execution_env.cwd),
-        model_name=getattr(getattr(provider, "config", None), "model", "unknown"),
+    return ToolSelectionContextBuilder(
+        DefaultContextBuilder(
+            str(execution_env.cwd),
+            model_name=getattr(getattr(provider, "config", None), "model", "unknown"),
+        )
     )
 
 

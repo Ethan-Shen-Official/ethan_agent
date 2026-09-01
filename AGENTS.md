@@ -33,7 +33,9 @@ src/
 │   └── views/{session.py,tree.py}
 ├── core/{types.py,events.py,state.py,loop.py,context.py,errors.py}
 ├── providers/{base.py,openai_compatible.py}
-├── tools/{base.py,registry.py,executor.py,filesystem.py,shell.py}
+├── tools/{base.py,registry.py,executor.py,definition.py,details.py}
+│   ├── filesystem/{read.py,write.py,edit.py,ls.py,find.py,grep.py}
+│   └── process/{common.py,bash.py,powershell.py}
 ├── runtime/
 │   ├── permissions.py
 │   ├── execution.py
@@ -109,7 +111,7 @@ src/
 
 - `ModelProvider.stream(request)`：输出内部 ProviderEvent，不泄漏厂商消息类型；
 - `Tool`：名称、描述、输入校验、风险分类、执行和结果映射；
-- `SessionStore`：追加/读取消息，保留 `session_id`、`message_id`、`parent_id`、`operation_id`；实现已拆分为契约、路径、编解码和 JSONL/树存储模块，保留 `runtime.session` 兼容导出入口；
+- `SessionStore`：追加/读取消息，保留 `session_id`、`message_id`、`parent_id`、`operation_id`；实现已拆分为契约、路径、编解码和 JSONL/树存储模块，由 `runtime.session` 提供公共导出；
 - `AgentEvent`：TUI、测试和未来 GUI/RPC/ACP 的只读事件流；
 - `ExecutionEnv`：抽象文件系统、Shell、cwd、环境策略和资源限制。
 
@@ -135,7 +137,7 @@ src/
 - Harness owns one LoopState and restores the active branch transcript from JsonlSessionStore at startup. The active session is never deletable through `/drop`; deleting a non-active session does not change the current store or LoopState.
 - A normal launch creates a new session at .agent/sessions/<timestamp>_<12-hex-random-id>.jsonl under the workspace root. The JSONL still stores the full session_id. `--continue` resumes the most recently modified workspace session; `--session-file` or session_path selects an explicit file.
 - Each JSONL record contains session_id, message_id, parent_id, operation_id, and either a serialized Message or typed compaction/session-info metadata. The persisted format is append-only and versioned. A sibling `.head` file stores the active leaf; checkout/rollback moves that pointer without deleting historical records.
-- Tool output is capped centrally by ToolExecutor at 2,000 lines or 50 KiB by default. File/search/list results use head truncation; exe uses tail truncation. Truncation is UTF-8 byte-safe and records metadata on ToolResult.
+- Tool output is capped centrally by ToolExecutor at 2,000 lines or 50 KiB by default. File/search/list results use head truncation; bash/powershell use tail truncation. Truncation is UTF-8 byte-safe and records metadata on ToolResult.
 - A truncated result contains an actionable notice for the model. The full source files remain unchanged; callers can use a narrower read/search request to retrieve omitted data.
 
 ## Context and persistence boundaries

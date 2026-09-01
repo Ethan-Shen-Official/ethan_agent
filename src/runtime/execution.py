@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import locale
 import os
 import signal
 import subprocess
@@ -202,7 +203,14 @@ class LocalExecutionEnv(ExecutionEnv):
             command,
             cwd=self.cwd,
             shell=True,
+            # Commands inherit the user's Windows code page (usually GBK),
+            # but compilers and binary-oriented tools can emit arbitrary
+            # bytes.  Replacement decoding keeps those diagnostics visible
+            # without allowing one malformed byte to crash the TUI reader
+            # thread with UnicodeDecodeError.
             text=True,
+            encoding=locale.getpreferredencoding(False),
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=creationflags,

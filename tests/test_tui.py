@@ -59,6 +59,16 @@ def test_markdown_renderer_unescapes_markup_and_wraps_wide_text_by_cells():
     assert render_markdown("中文测试", 6) == ["中文测", "试"]
 
 
+def test_styled_markdown_marks_headings_code_paths_and_lists():
+    from cli.ui.markdown import render_markdown_styled
+
+    text = "# Title\nUse `src/app.py` and **bold**\n- item"
+    lines = render_markdown_styled(text, 60)
+    assert any("\x1b[33;1m" in line for line in lines)
+    assert any("\x1b[36m" in line and "src/app.py" in line for line in lines)
+    assert any("\x1b[38;5;116m" in line for line in lines)
+
+
 def test_renderer_keeps_all_runtime_command_output_blocks():
     terminal = _FakeTerminal()
     terminal.rows = 30
@@ -126,6 +136,25 @@ def test_screen_renderer_reserves_editor_and_footer_and_hides_completed_tool():
     terminal.output = StringIO()
     renderer.render(state)
     assert "agent> hello" in terminal.output.getvalue()
+
+
+def test_empty_tui_uses_pi_style_startup_header_and_context():
+    terminal = _FakeTerminal()
+    state = UiState(cwd="D:/workspace", startup_context=("AGENTS.md",))
+    lines, _ = ScreenRenderer(terminal)._lines(state)
+    output = "\n".join(lines)
+    assert "coding-agent v0.1.0" in output
+    assert "escape interrupt" in output
+    assert "Press ctrl+o" in output
+    assert "[Context]" in output
+    assert "AGENTS.md" in output
+
+
+def test_startup_context_does_not_inherit_parent_directory():
+    # The workspace used by this test has no context file of its own while
+    # the repository root does; discovery must remain workspace-local.
+    context = TuiApplication._discover_startup_context("D:/NJU/codeagent/workspace")
+    assert context == ("No System Context File",)
 
 
 def test_non_tty_terminal_does_not_enable_raw_mode():
@@ -244,9 +273,10 @@ def test_tty_renderer_uses_pi_style_message_bands_and_footer_stats():
     state.active_tool = ToolView("read", {"path": "a.txt"})
     ScreenRenderer(terminal).render(state)
     output = terminal.output.getvalue()
-    assert "48;5;24" in output  # user/input background
-    assert "48;5;236" in output  # console background
+    assert "48;2;52;53;65" in output  # submitted user background
+    assert "48;2;55;55;65" in output  # system notification background
     assert "running read" in output
+    assert "\x1b[36;1mrunning read" in output
     assert "↑6.3k" in output
     assert "↓773" in output
     assert "R37k" in output
@@ -490,6 +520,39 @@ def test_permission_state_renders_visible_approval_panel():
     output = terminal.output.getvalue()
     assert "permission required" in output
     assert "echo test" in output
+
+
+def test_confirmation_editor_uses_yellow_confirm_prompt():
+    terminal = _FakeTerminal()
+    terminal.is_tty = True
+    state = UiState(mode="permission", input_text="y")
+    lines, _ = ScreenRenderer(terminal)._lines(state)
+    editor_line = next(line for line in lines if "confirm(y/n)>" in line)
+    assert "\x1b[33;1m" in editor_line
+
+
+def test_waiting_approval_status_uses_confirmation_prompt_before_mode_sync():
+    terminal = _FakeTerminal()
+    terminal.is_tty = True
+    state = UiState(mode="working", status="waiting for approval", input_text="")
+    lines, _ = ScreenRenderer(terminal)._lines(state)
+    editor_line = next(line for line in lines if "confirm(y/n)>" in line)
+    assert "\x1b[33;1m" in editor_line
+
+
+def test_user_and_tool_blocks_share_horizontal_padding():
+    terminal = _FakeTerminal()
+    state = UiState(
+        transcript=[
+            TranscriptItem("user", "question"),
+            TranscriptItem("tool", "result", tool_name="exe", tool_arguments={"cmd": "echo ok"}),
+        ]
+    )
+    lines, _ = ScreenRenderer(terminal)._lines(state)
+    user_line = next(line for line in lines if "question" in line)
+    tool_line = next(line for line in lines if "echo ok" in line)
+    assert " question" in user_line
+    assert " echo ok" in tool_line
 
 
 def test_approval_broker_pending_flag_is_visible_across_thread_boundary():

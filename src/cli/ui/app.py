@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from io import StringIO
+from pathlib import Path
 from queue import Empty, Queue
 import threading
 import time
@@ -46,7 +47,23 @@ class TuiApplication:
             model_name=self._model_name(harness),
             session_name=getattr(harness, "session_name", None),
         )
+        self.state.startup_context = self._discover_startup_context(self.state.cwd)
         self._restore_transcript()
+
+    @staticmethod
+    def _discover_startup_context(cwd: str) -> tuple[str, ...]:
+        """Return instruction resource names shown in the initial header."""
+        try:
+            root = Path(cwd).resolve()
+        except (OSError, ValueError):
+            return ("No System Context File",)
+        # Startup resources belong to the selected workspace only.  Do not
+        # inherit an instruction file from a parent directory: that would
+        # make two different workspaces display misleading context.
+        for name in ("AGENTS.md", "CLAUDE.md"):
+            if (root / name).is_file():
+                return (name,)
+        return ("No System Context File",)
 
     def _restore_transcript(self) -> None:
         """Project persisted user/assistant messages into the TUI transcript."""

@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from .state import ToolView, UiState
-from .markdown import render_markdown
+from .markdown import render_markdown, render_markdown_styled
+from .tool_render import edit_diff_lines, is_diff_line
 
 
 class Component(Protocol):
@@ -60,6 +61,14 @@ class TranscriptComponent:
         r = self.renderer
         if state.overlay_kind in {"resume", "tree"} or (state.overlay_kind == "drop" and not state.overlay_value):
             return self._render_selector(state, width)
+        if (
+            not state.transcript
+            and not state.input_text
+            and state.active_tool is None
+            and state.status == "ready"
+            and state.overlay_kind is None
+        ):
+            return self._render_startup(state, width)
         content: list[str] = [
             r._styled(r._clip(f" coding-agent  {state.cwd}", width), "36;1"),
             r._styled(r._clip(f" session {state.session_id[:12] or '-'}  {state.status}", width), "2"),
@@ -68,18 +77,25 @@ class TranscriptComponent:
         for item in state.transcript:
             if item.kind in {"user", "assistant", "tool"} and content and content[-1] != "":
                 content.append("")
-            prefix = {"user": "› ", "assistant": "● ", "tool": "● ", "system": "  ", "error": "× "}[item.kind]
+            # ToolExecutionComponent owns its title line; unlike assistant
+            # prose it does not use the large conversation bullet.
+            prefix = {"user": "› ", "assistant": "● ", "tool": "", "system": "  ", "error": "× "}[item.kind]
             raw_text = item.text or ("…" if item.streaming else "")
             if item.kind == "tool":
                 wrapped = self._tool_preview(item, state, width)
             elif item.kind == "assistant":
-                wrapped = render_markdown(raw_text, max(1, width - len(prefix) - 2))
+                wrapped = render_markdown_styled(raw_text, max(1, width - len(prefix) - 2))
             else:
                 wrapped = r._wrap(raw_text, max(1, width - len(prefix) - 2)) or [""]
             if item.kind == "user":
+                # The blue block belongs to submitted history, never to the
+                # live editor.  Match Pi's Box-style vertical padding.
+                content.append(r._band("", r._USER_FG, r._USER_BG, width))
                 for index, line in enumerate(wrapped):
-                    label = prefix if index == 0 else " " * len(prefix)
+                    # Match Pi's Box(paddingX=1) for submitted user blocks.
+                    label = " " + (prefix if index == 0 else " " * len(prefix))
                     content.append(r._band(label + line, r._USER_FG, r._USER_BG, width))
+                content.append(r._band("", r._USER_FG, r._USER_BG, width))
             elif item.kind == "system":
                 for index, line in enumerate(wrapped):
                     label = prefix if index == 0 else " " * len(prefix)
@@ -89,14 +105,29 @@ class TranscriptComponent:
                     label = prefix if index == 0 else " " * len(prefix)
                     content.append(r._band(label + line, r._ERROR_FG, r._ERROR_BG, width))
             elif item.kind == "tool":
-                # Completed tool output is a normal transcript block, but its
-                # warm band keeps it distinguishable from model prose.
+                # Pi gives tool results their own padded block.  Keep the
+                # background on every physical row, including the vertical
+                # padding, so long outputs remain visually grouped.
+                content.append(r._band("", r._TOOL_FG, self._tool_bg(item), width))
                 for index, line in enumerate(wrapped):
-                    label = prefix if index == 0 else " " * len(prefix)
-                    content.append(r._band(label + line, r._TOOL_FG, r._TOOL_BG, width))
+                    # Tool blocks use the same horizontal inset as user
+                    # blocks, even though they have no role bullet.
+                    label = " " + (prefix if index == 0 else " " * len(prefix))
+                    style = is_diff_line(line)
+                    has_header = bool(item.tool_name and item.tool_arguments is not None)
+                    if has_header and index == 0:
+                        fg = "36;1"
+                    else:
+                        fg = {"removed": "31", "added": "32", "context": "37"}.get(
+                            style, "97" if item.tool_error else "37"
+                        )
+                    content.append(r._band(label + line, fg, self._tool_bg(item), width))
+                content.append(r._band("", r._TOOL_FG, self._tool_bg(item), width))
             else:
-                content.append(r._styled(prefix + wrapped[0], ""))
-                content.extend("  " + line for line in wrapped[1:])
+                # Normal assistant prose uses readable terminal gray; dim is
+                # reserved for metadata and transient status text.
+                content.append(r._styled(prefix + wrapped[0], "37"))
+                content.extend(r._styled("  " + line, "37") for line in wrapped[1:])
         if state.active_tool is not None:
             # Tool arguments (especially ``write.content``) can be megabytes
             # long.  Never let them become an unbounded physical terminal
@@ -106,9 +137,9 @@ class TranscriptComponent:
                 frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
                 glyph = frames[int(getattr(state, "spinner_frame", 0)) % len(frames)]
                 running = f"  {glyph}{running[3:]}"
-            content.append(r._styled(running, "2"))
-            if state.mode == "permission":
-                content.append(r._styled(r._clip("  permission required · press y to allow or n to deny", width), "33"))
+            content.append(self._tool_call_line(running, width))
+            if state.mode == "permission" or state.status == "waiting for approval":
+                content.append(r._styled(r._clip("  permission required · press y to allow or n to deny", width), "33;1"))
         elif state.status == "compacting":
             content.append(r._styled(self._working_indicator(state, "compacting context..."), "2"))
         elif state.mode == "working":
@@ -117,6 +148,36 @@ class TranscriptComponent:
             content.append("")
             content.append(r._styled(r._clip(f"  Permanently delete session '{state.overlay_value}'? [y/N]", width), "33;1"))
         return content
+
+    def _render_startup(self, state: UiState, width: int) -> list[str]:
+        """Render Pi's compact first-screen onboarding header."""
+        r = self.renderer
+        lines = [
+            r._styled(r._clip(" coding-agent", width), "36;1")
+            + r._styled(" v0.1.0", "90"),
+            r._styled(
+                r._clip(
+                    " escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more",
+                    width,
+                ),
+                "90",
+            ),
+            r._styled(
+                r._clip(" Press ctrl+o to show full startup help and loaded resources.", width),
+                "90",
+            ),
+            "",
+            r._styled(
+                r._clip(
+                    " Coding-agent can explain its own features and look up its docs. Ask it how to use or extend it.",
+                    width,
+                ),
+                "90",
+            ),
+        ]
+        lines.extend(("", r._styled(r._clip("[Context]", width), "33;1")))
+        lines.extend(r._styled(r._clip(f"  {name}", width), "90") for name in state.startup_context)
+        return lines
 
     def _render_selector(self, state: UiState, width: int) -> list[str]:
         """Render Pi-style full conversation-area selectors."""
@@ -233,6 +294,15 @@ class TranscriptComponent:
         header = ""
         if item.tool_name and item.tool_arguments is not None:
             header = self._tool_result_summary(item, available)
+        # Edit results are intentionally projected from arguments rather than
+        # changing the runtime ToolResult shape.  This mirrors Pi's diff
+        # component while preserving the complete plain result for the model.
+        if item.tool_name in {"edit", "edit_file"} and not item.tool_error:
+            diff, omitted = edit_diff_lines(item.tool_arguments, max_lines=24)
+            if diff:
+                all_lines = diff
+                if omitted:
+                    all_lines.append(f"... ({omitted} more diff lines, Ctrl+O to expand)")
         if not item.collapsed or state.tools_expanded:
             return ([header] if header else []) + all_lines
 
@@ -247,6 +317,34 @@ class TranscriptComponent:
             noun = "lines hidden" if hide_success else "more lines"
             shown.append(f"... ({remaining} {noun}, Ctrl+O to expand)")
         return shown or ["(no output; Ctrl+O to expand)"]
+
+    @staticmethod
+    def _tool_bg(item: TranscriptItem) -> str:
+        if item.tool_error:
+            return "48;2;60;40;40"
+        if item.tool_name in {"edit", "edit_file"}:
+            return "48;2;40;50;40"
+        return "48;2;40;50;40"
+
+    def _tool_call_line(self, text: str, width: int) -> str:
+        """Render a pending call with distinct status, name and arguments."""
+        plain = self.renderer._clip(text, width)
+        marker, separator, rest = plain.partition("running ")
+        if not separator:
+            return self.renderer._styled(plain, "90")
+        name, colon, arguments = rest.partition(": ")
+        if not colon:
+            name, separator_space, arguments = rest.partition(" ")
+            colon = separator_space
+        # Keep a single block inset; the summary text historically carried
+        # two leading spaces for the old plain REPL layout.
+        rendered = self.renderer._styled(" " + marker.lstrip(), "90")
+        # Keep the human-readable call label contiguous while highlighting the
+        # tool name as a distinct Pi-style title token.
+        rendered += self.renderer._styled(separator + name, "36;1")
+        if arguments:
+            rendered += self.renderer._styled((": " if colon == ": " else " ") + arguments, "90")
+        return rendered
 
     def _tool_result_summary(self, item: TranscriptItem, width: int) -> str:
         summary = self._tool_call_summary(ToolView(item.tool_name, item.tool_arguments), self.renderer)

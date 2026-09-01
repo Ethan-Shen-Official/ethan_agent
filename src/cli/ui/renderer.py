@@ -68,10 +68,12 @@ class ScreenRenderer:
     with the editor or leave stale tool output behind.
     """
 
-    _USER_FG, _USER_BG = "97", "48;5;24"
-    _SYSTEM_FG, _SYSTEM_BG = "37", "48;5;236"
-    _TOOL_FG, _TOOL_BG = "97", "48;5;58"
-    _ERROR_FG, _ERROR_BG = "97", "48;5;52"
+    # These 256-color values track Pi's dark theme: graphite user cards,
+    # neutral system cards, and restrained green/red tool result cards.
+    _USER_FG, _USER_BG = "97", "48;2;52;53;65"
+    _SYSTEM_FG, _SYSTEM_BG = "97", "48;2;55;55;65"
+    _TOOL_FG, _TOOL_BG = "97", "48;2;40;50;40"
+    _ERROR_FG, _ERROR_BG = "97", "48;2;60;40;40"
 
     def __init__(self, terminal) -> None:
         self.terminal = terminal
@@ -126,12 +128,19 @@ class ScreenRenderer:
             offset = max(0, min(int(state.scroll_offset), max(0, len(content) - available_body)))
             end = len(content) - offset
             body = content[max(0, end - available_body) : end]
+            # The body is a flex region in Pi's layout.  Fill unused rows so
+            # the editor and footer remain anchored to the bottom edge even
+            # for a fresh or very short conversation.
+            if len(body) < available_body:
+                body = [""] * (available_body - len(body)) + body
         else:
             body = []
         if apply_selection and state.selection_anchor and state.selection_focus and self.terminal.is_tty:
             body = self._highlight_selection(body, state.selection_anchor, state.selection_focus, width)
-        lines = body + footer + editor
-        return lines, (len(body) + len(footer) + cursor[0] + 1, cursor[1] + 1)
+        # Pi keeps the editor immediately above the fixed status footer.  Only
+        # the conversation viewport scrolls when the terminal is short.
+        lines = body + editor + footer
+        return lines, (len(body) + cursor[0] + 1, cursor[1] + 1)
 
     def _highlight_selection(
         self,
@@ -195,10 +204,10 @@ class ScreenRenderer:
             line = f" {left}{' ' * max(2, width - self._display_width(left) - right_width - 1)}{right}"
         else:
             line = f" {left}"
-        # Keep the status region visually separated from the transcript while
-        # reserving it as a fixed block at the bottom of the viewport.
-        separator = self._styled("-" * width, "2")
-        return [separator, self._styled(self._clip(f" {cwd}", width), "2"), self._styled(self._clip(line, width), "2")]
+        # The editor's lower border is the visual separator.  Keeping the
+        # footer to two rows avoids a duplicated horizontal rule while still
+        # reserving a fixed status block at the bottom of the viewport.
+        return [self._styled(self._clip(f" {cwd}", width), "90"), self._styled(self._clip(line, width), "90")]
 
     # Compatibility helpers retained for callers that used the early P0
     # renderer directly; layout now goes through FooterComponent.
@@ -207,11 +216,20 @@ class ScreenRenderer:
 
     def _editor_lines_impl(self, state: UiState, width: int) -> tuple[list[str], tuple[int, int]]:
         selecting = state.overlay_kind == "resume" or (state.overlay_kind == "drop" and not state.overlay_value)
-        prompt = " select> " if selecting else " confirm> " if state.overlay_kind == "drop" else " agent> "
+        # The approval broker may publish its waiting status before the UI
+        # mode is synchronized. Keep the editor in confirmation state during
+        # that transition so normal agent input is never shown.
+        confirming = (
+            state.mode == "permission"
+            or state.status == "waiting for approval"
+            or (state.overlay_kind == "drop" and bool(state.overlay_value))
+        )
+        prompt = " select> " if selecting else " confirm(y/n)> " if confirming else " agent> "
+        prompt_style = "33;1" if confirming else "37"
         prompt_width = self._display_width(prompt)
         available = max(1, width - prompt_width)
         raw_lines = state.input_text.split("\n") or [""]
-        rendered: list[str] = []
+        rendered: list[str] = [self._styled("─" * width, "2")]
         absolute = max(0, min(len(state.input_text), state.cursor_position))
         before = state.input_text[:absolute]
         cursor_row = 0
@@ -228,7 +246,12 @@ class ScreenRenderer:
             chunks = chunks or [""]
             for chunk_index, chunk in enumerate(chunks):
                 label = prompt if row == 0 and chunk_index == 0 else " " * prompt_width
-                rendered.append(self._band(label + chunk, self._USER_FG, self._USER_BG, width))
+                # The live editor is intentionally plain: Pi only applies the
+                # blue user background after the prompt is submitted.
+                plain = self._clip(label + chunk, width)
+                rendered.append(
+                    self._styled(plain + " " * max(0, width - self._display_width(plain)), prompt_style)
+                )
         # Map the logical cursor offset to the wrapped display row. Newlines
         # and terminal-width wrapping both consume a row.
         logical_lines = before.split("\n")
@@ -242,7 +265,9 @@ class ScreenRenderer:
             if value and self._display_width(value) % available == 0:
                 cursor_col = prompt_width + available
         cursor_row = min(max(0, len(rendered) - 1), cursor_row)
-        return rendered, (cursor_row, min(width - 1, cursor_col))
+        rendered.append(self._styled("─" * width, "2"))
+        # The top border occupies one physical row in the editor component.
+        return rendered, (cursor_row + 1, min(width - 1, cursor_col))
 
     def _editor_lines(self, state: UiState, width: int) -> tuple[list[str], tuple[int, int]]:
         return self.editor_component.render(state, width)

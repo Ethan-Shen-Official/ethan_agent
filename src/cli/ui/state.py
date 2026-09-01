@@ -75,6 +75,10 @@ class UiState:
     copy_status: str | None = None
     cwd: str = "."
     session_id: str = ""
+    # One-shot Pi-style onboarding shown before the first submitted message.
+    # Resource names are populated by the application, keeping components
+    # pure and avoiding filesystem access during rendering.
+    startup_context: tuple[str, ...] = ()
     # Interactive slash-command overlays stay inside the managed TUI.  They
     # are intentionally data-only so the renderer can keep the transcript and
     # fixed footer alive while a selector/confirmation is active.

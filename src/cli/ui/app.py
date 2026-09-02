@@ -8,6 +8,8 @@ from queue import Empty, Queue
 import threading
 import time
 from typing import TYPE_CHECKING
+import json
+import math
 
 from core.errors import SessionError
 from ..commands import handle_repl_command, is_exit_command, resolve_command
@@ -17,6 +19,7 @@ from .reducer import reduce_event
 from .renderer import ScreenRenderer
 from .state import TranscriptItem, UiState
 from .terminal import TerminalBackend
+from runtime.compact import estimate_tokens
 
 if TYPE_CHECKING:
     from harness.app import Harness
@@ -117,6 +120,7 @@ class TuiApplication:
         for field in (
             "tokens",
             "input_tokens",
+            "last_input_tokens",
             "output_tokens",
             "cache_read_tokens",
             "cache_write_tokens",
@@ -135,6 +139,14 @@ class TuiApplication:
             self.state.context_percent = None
             return
 
+        self._refresh_context_usage()
+
+    def _refresh_context_usage(self) -> None:
+        """Refresh the current-window meter without resetting cumulative usage."""
+        context_window = int(getattr(self.state, "context_window", 0) or 0)
+        if not context_window:
+            return
+
         projected = 0
         service = getattr(self.harness, "compaction", None)
         estimate = getattr(service, "projected_token_count", None)
@@ -147,7 +159,58 @@ class TuiApplication:
                 # A custom harness may not expose a usable compaction ledger;
                 # context restoration must never make the TUI fail to start.
                 projected = 0
-        self.state.context_percent = min(100.0, projected * 100.0 / context_window)
+        # Include the request envelope when no provider usage is available.
+        # The compaction ledger covers transcript messages only, while the
+        # actual context also contains instructions and tool schemas.
+        projected = max(
+            projected,
+            self._request_context_tokens(
+                allow_prepare=projected == 0 and not getattr(self.state, "last_input_tokens", 0)
+            ),
+        )
+
+        # A provider's latest prompt-token count includes the system prompt
+        # and tool schemas, so prefer it when available. The projected ledger
+        # remains the fallback for resumed sessions and providers that omit
+        # detailed usage.
+        current_tokens = max(projected, int(getattr(self.state, "last_input_tokens", 0) or 0))
+        self.state.context_percent = min(100.0, current_tokens * 100.0 / context_window)
+
+    def _request_context_tokens(self, *, allow_prepare: bool = True) -> int:
+        """Estimate the complete latest model request when usage is absent."""
+        snapshot = None
+        inspector = getattr(self.harness, "context_inspector", None)
+        getter = getattr(inspector, "snapshot", None)
+        if callable(getter):
+            try:
+                snapshot = getter()
+            except Exception:
+                snapshot = None
+        request = getattr(snapshot, "request", None)
+        if request is None and allow_prepare:
+            loop = getattr(self.harness, "loop", None)
+            prepare = getattr(loop, "prepare_context", None)
+            loop_state = getattr(self.harness, "state", None)
+            if callable(prepare) and loop_state is not None:
+                try:
+                    request = prepare(loop_state)
+                except Exception:
+                    request = None
+        if request is None:
+            return 0
+        chars = len(str(getattr(request, "system_prompt", "") or ""))
+        for message in getattr(request, "messages", ()) or ():
+            try:
+                chars += estimate_tokens(message) * 4
+            except Exception:
+                chars += len(str(getattr(message, "content", "") or ""))
+        for spec in getattr(request, "tools", ()) or ():
+            chars += len(str(getattr(spec, "description", "") or ""))
+            try:
+                chars += len(json.dumps(getattr(spec, "input_schema", {}) or {}, ensure_ascii=False))
+            except (TypeError, ValueError):
+                pass
+        return max(0, math.ceil(chars / 4))
 
     def _sync_session_view(self) -> None:
         """Replace the viewport transcript after a session/branch switch."""
@@ -216,6 +279,7 @@ class TuiApplication:
         # frame so typed characters and cursor movement are visible.
         self.state.input_text = self.editor.text
         self.state.cursor_position = self.editor.cursor
+        self._refresh_context_usage()
         try:
             self.state.permission_mode = str(self.harness.permission_mode())
         except Exception:

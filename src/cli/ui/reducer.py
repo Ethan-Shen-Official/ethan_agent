@@ -69,6 +69,8 @@ def reduce_event(state: UiState, event: AgentEvent) -> UiState:
         data = event.data
         state.tokens += int(data.get("tokens", data.get("total_tokens", 0)) or 0)
         state.input_tokens += int(data.get("input_tokens", data.get("input", 0)) or 0)
+        if any(key in data for key in ("input_tokens", "input")):
+            state.last_input_tokens = int(data.get("input_tokens", data.get("input", 0)) or 0)
         state.output_tokens += int(data.get("output_tokens", data.get("output", 0)) or 0)
         state.cache_read_tokens += int(data.get("cache_read_tokens", data.get("cache_read", 0)) or 0)
         state.cache_write_tokens += int(data.get("cache_write_tokens", data.get("cache_write", 0)) or 0)

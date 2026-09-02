@@ -1,0 +1,130 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest
+      - name: Run tests
+        run: python -m pytest -q
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build
+      - name: Build wheel and sdist
+        run: python -m build
+      - name: Assert no secrets or .env in artifacts
+        run: |
+          python - <<'EOF'
+          import glob
+          import re
+          import tarfile
+          import zipfile
+
+          SECRET = re.compile(
+              r"sk-[A-Za-z0-9]{16,}"
+              r"|BEGIN (RSA|EC|OPENSSH|PGP) PRIVATE KEY"
+              r"|AKIA[0-9A-Z]{16}"
+          )
+
+          def check_text(text, where):
+              if SECRET.search(text):
+                  raise SystemExit(f"secret pattern found in {where}")
+
+          def check_members(archive, names, read_text):
+              if any(".env" in n.lower() for n in names):
+                  leaked = [n for n in names if ".env" in n.lower()]
+                  raise SystemExit(f".env leaked into archive: {leaked}")
+              for name in names:
+                  if name.endswith(".py"):
+                      check_text(read_text(name), name)
+
+          for wheel in glob.glob("dist/*.whl"):
+              zf = zipfile.ZipFile(wheel)
+              check_members(zf, zf.namelist(), lambda n: zf.read(n).decode("utf-8", "replace"))
+              print(f"wheel clean: {wheel}")
+
+          for sdist in glob.glob("dist/*.tar.gz"):
+              with tarfile.open(sdist) as tf:
+                  names = tf.getnames()
+                  if any(".env" in n.lower() for n in names):
+                      leaked = [n for n in names if ".env" in n.lower()]
+                      raise SystemExit(f".env leaked into archive: {leaked}")
+                  for member in tf.getmembers():
+                      if member.isfile() and member.name.endswith(".py"):
+                          text = tf.extractfile(member).read().decode("utf-8", "replace")
+                          check_text(text, member.name)
+              print(f"sdist clean: {sdist}")
+
+          print("artifact leak check passed")
+          EOF
+      - name: Upload Python packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-packages
+          path: dist/*
+
+  binaries:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: coding-agent-linux
+          - os: windows-latest
+            artifact: coding-agent-windows
+          - os: macos-latest
+            artifact: coding-agent-macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+      - name: Build standalone binary
+        run: pyinstaller --onefile --name coding-agent src/main.py
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/coding-agent*
+
+  release:
+    needs: [build, binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**
+          generate_release_notes: true

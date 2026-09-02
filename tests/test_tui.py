@@ -119,6 +119,32 @@ def test_reducer_accumulates_detailed_usage_for_footer():
     assert (state.input_tokens, state.output_tokens, state.cache_read_tokens) == (6300, 773, 37000)
     assert state.cost == 0.004
     assert state.context_window == 1_000_000
+    assert state.last_input_tokens == 6300
+
+
+def test_context_meter_refreshes_after_new_messages_are_added():
+    from types import SimpleNamespace
+
+    class HarnessStub:
+        is_running = False
+        session_id = "session-id"
+        execution_env = SimpleNamespace(cwd="D:/workspace")
+        compact_config = SimpleNamespace(context_window=100)
+
+        def __init__(self):
+            self.projected = 0
+            self.compaction = SimpleNamespace(projected_token_count=lambda: self.projected)
+
+    harness = HarnessStub()
+    app = TuiApplication(harness, ApprovalBroker())
+    assert app.state.context_percent == 0.0
+    harness.projected = 35
+    app._draw()
+    assert app.state.context_percent == 35.0
+
+    reduce_event(app.state, AgentEvent("usage", {"input_tokens": 72, "tokens": 80}))
+    app._draw()
+    assert app.state.context_percent == 72.0
 
 
 def test_screen_renderer_reserves_editor_and_footer_and_hides_completed_tool():
@@ -340,7 +366,7 @@ def test_tty_renderer_uses_pi_style_message_bands_and_footer_stats():
     ScreenRenderer(terminal).render(state)
     output = terminal.output.getvalue()
     assert "48;2;52;53;65" in output  # submitted user background
-    assert "48;2;55;55;65" in output  # system notification background
+    assert "48;2;55;55;65" not in output  # slash output uses normal background
     assert "running read" in output
     assert "\x1b[36;1mrunning read" in output
     assert "↑6.3k" in output

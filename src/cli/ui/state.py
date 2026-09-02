@@ -51,6 +51,10 @@ class UiState:
     # provider supplies them.
     tokens: int = 0
     input_tokens: int = 0
+    # Input tokens reported for the most recent provider request. Unlike
+    # input_tokens (the cumulative footer counter), this is a context-size
+    # signal and can be used for the current-window meter.
+    last_input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0

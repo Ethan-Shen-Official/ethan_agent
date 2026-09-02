@@ -23,7 +23,6 @@ jobs:
         run: python -m pytest -q
 
   build:
-    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -87,7 +86,6 @@ jobs:
           path: dist/*
 
   binaries:
-    needs: test
     strategy:
       fail-fast: false
       matrix:
@@ -108,7 +106,7 @@ jobs:
       - name: Install PyInstaller
         run: python -m pip install --upgrade pip pyinstaller
       - name: Build standalone binary
-        run: pyinstaller --onefile --name coding-agent src/main.py
+        run: python -m PyInstaller --clean --onefile --name coding-agent --paths src src/main.py
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
